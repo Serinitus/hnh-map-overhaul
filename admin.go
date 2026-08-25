@@ -1653,6 +1653,77 @@ func (m *Map) findMapsWithoutEntry() ([]MapInfo, error) {
 	return result, nil
 }
 
+// layoutSimilarityThreshold is how much of two maps' tiles have to line
+// up (same relative position, same tile-image content hash) for them to
+// count as the same template. Started at an exact 100% match, but a
+// single client-side rendering difference (lighting, foliage frame)
+// between two otherwise-identical spawn instances would silently break
+// that -- 90% tolerates a handful of mismatched tiles while still
+// requiring the layouts to be genuinely the same shape.
+const layoutSimilarityThreshold = 0.90
+
+// mapTileSet is a map's grids normalized to (relative x, relative y) ->
+// tile content hash, relative to that map's own bounding box so the
+// same template matches regardless of which absolute coordinates the
+// mapper assigned it.
+func (m *Map) buildTileSet(entries []struct {
+	id   string
+	x, y int
+}) map[string]string {
+	minX, minY := entries[0].x, entries[0].y
+	for _, e := range entries {
+		if e.x < minX {
+			minX = e.x
+		}
+		if e.y < minY {
+			minY = e.y
+		}
+	}
+	tiles := map[string]string{}
+	for _, e := range entries {
+		f, err := os.Open(filepath.Join(m.gridStorage, "grids", e.id+".png"))
+		if err != nil {
+			// A grid this map thinks it has, but whose tile image is
+			// missing on disk -- skip that one tile rather than failing
+			// this map's whole comparison (and definitely rather than
+			// crashing the report over one bad file).
+			continue
+		}
+		h := sha256.New()
+		_, copyErr := io.Copy(h, f)
+		f.Close()
+		if copyErr != nil {
+			continue
+		}
+		key := fmt.Sprintf("%d,%d", e.x-minX, e.y-minY)
+		tiles[key] = hex.EncodeToString(h.Sum(nil))
+	}
+	return tiles
+}
+
+// tileSetSimilarity is the fraction of (position, tile-hash) pairs the
+// two sets agree on, out of every position either one has -- so it
+// penalizes both mismatched tile content at a shared position and a
+// differently-shaped map (extra/missing positions), not just one or
+// the other.
+func tileSetSimilarity(a, b map[string]string) float64 {
+	union := map[string]bool{}
+	matches := 0
+	for pos, hashA := range a {
+		union[pos] = true
+		if hashB, ok := b[pos]; ok && hashB == hashA {
+			matches++
+		}
+	}
+	for pos := range b {
+		union[pos] = true
+	}
+	if len(union) == 0 {
+		return 0
+	}
+	return float64(matches) / float64(len(union))
+}
+
 func (m *Map) findDuplicateMaps() ([]DuplicateGroup, error) {
 	gridCounts, candidates, mapInfos, err := m.findSmallMapCandidates()
 	if err != nil {
@@ -1663,70 +1734,66 @@ func (m *Map) findDuplicateMaps() ([]DuplicateGroup, error) {
 		return nil, err
 	}
 
-	groups := map[string][]int{}
+	mapids := make([]int, 0, len(candidates))
+	tileSets := map[int]map[string]string{}
 	for mapid, entries := range candidates {
-		minX, minY := entries[0].x, entries[0].y
-		for _, e := range entries {
-			if e.x < minX {
-				minX = e.x
-			}
-			if e.y < minY {
-				minY = e.y
+		mapids = append(mapids, mapid)
+		tileSets[mapid] = m.buildTileSet(entries)
+	}
+	sort.Ints(mapids)
+
+	// Union-find over the >=90%-similar pairs, so A-B and B-C both being
+	// similar enough (even if A-C alone wouldn't clear the threshold)
+	// still lands all three in one group.
+	parent := map[int]int{}
+	var find func(int) int
+	find = func(x int) int {
+		if parent[x] != x {
+			parent[x] = find(parent[x])
+		}
+		return parent[x]
+	}
+	union := func(a, b int) {
+		ra, rb := find(a), find(b)
+		if ra != rb {
+			parent[ra] = rb
+		}
+	}
+	for _, id := range mapids {
+		parent[id] = id
+	}
+	for i := 0; i < len(mapids); i++ {
+		for j := i + 1; j < len(mapids); j++ {
+			if tileSetSimilarity(tileSets[mapids[i]], tileSets[mapids[j]]) >= layoutSimilarityThreshold {
+				union(mapids[i], mapids[j])
 			}
 		}
-		type norm struct {
-			x, y int
-			hash string
-		}
-		normed := make([]norm, 0, len(entries))
-		for _, e := range entries {
-			f, err := os.Open(filepath.Join(m.gridStorage, "grids", e.id+".png"))
-			if err != nil {
-				// A grid this map thinks it has, but whose tile image is
-				// missing on disk -- skip that one tile rather than
-				// failing this map's whole fingerprint (and definitely
-				// rather than crashing the report over one bad file).
-				continue
-			}
-			h := sha256.New()
-			_, copyErr := io.Copy(h, f)
-			f.Close()
-			if copyErr != nil {
-				continue
-			}
-			normed = append(normed, norm{x: e.x - minX, y: e.y - minY, hash: hex.EncodeToString(h.Sum(nil))})
-		}
-		sort.Slice(normed, func(i, j int) bool {
-			if normed[i].x != normed[j].x {
-				return normed[i].x < normed[j].x
-			}
-			if normed[i].y != normed[j].y {
-				return normed[i].y < normed[j].y
-			}
-			return normed[i].hash < normed[j].hash
-		})
-		fp := sha256.New()
-		for _, n := range normed {
-			fmt.Fprintf(fp, "%d,%d,%s;", n.x, n.y, n.hash)
-		}
-		fingerprint := hex.EncodeToString(fp.Sum(nil))
-		groups[fingerprint] = append(groups[fingerprint], mapid)
+	}
+
+	byRoot := map[int][]int{}
+	for _, id := range mapids {
+		root := find(id)
+		byRoot[root] = append(byRoot[root], id)
 	}
 
 	result := []DuplicateGroup{}
-	for fp, mapids := range groups {
-		if len(mapids) < 2 {
+	for root, members := range byRoot {
+		if len(members) < 2 {
 			continue
 		}
-		dg := DuplicateGroup{Fingerprint: fp[:12]}
+		dg := DuplicateGroup{Fingerprint: fmt.Sprintf("group-%d", root)}
 		dg.NoneHaveEntry = true
-		for _, id := range mapids {
+		minGrids := gridCounts[members[0]]
+		for _, id := range members {
 			dg.Maps = append(dg.Maps, mapInfos[id])
 			if hasEntry[id] {
 				dg.NoneHaveEntry = false
 			}
+			if gridCounts[id] < minGrids {
+				minGrids = gridCounts[id]
+			}
 		}
-		dg.GridCount = gridCounts[mapids[0]]
+		dg.GridCount = minGrids
 		sort.Slice(dg.Maps, func(i, j int) bool { return dg.Maps[i].ID < dg.Maps[j].ID })
 		result = append(result, dg)
 	}

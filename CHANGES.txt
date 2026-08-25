@@ -1106,3 +1106,50 @@ forcing a detour through it from the list views.
   (`location.pathname` unchanged), with the correct map name/ID in the
   confirmation text; the eye icon's computed `cursor` now reads
   `pointer`.
+
+## 24. Duplicate-map layout matching loosened from exact to 90% similarity
+
+**What it does:** The high/lower-confidence "shared layout" groups in
+item 22's Duplicates report now group maps whose tiles are at least 90%
+identical (same relative position, same tile-image content), instead of
+requiring every single tile to match exactly.
+
+**Why:** Directly requested -- exact-hash matching (item 22's original
+approach) is fragile to any single pixel-level rendering difference
+between two otherwise-identical spawn instances (lighting, foliage
+frame), which would silently prevent two real duplicates from ever
+grouping together. This was already flagged as a theoretical risk in
+item 22; 90% tolerates that kind of noise while still requiring the
+layouts to be genuinely the same shape.
+
+**Files:** `admin.go` (`layoutSimilarityThreshold`, `buildTileSet`,
+`tileSetSimilarity`, `findDuplicateMaps` rewritten to pairwise-compare
+and union-find instead of exact-fingerprint grouping),
+`templates/admin/duplicates.tmpl` (wording updated from "exact tile
+layout" to "at least 90%"; "~N grids each" instead of a bare count,
+since group members can now have slightly different grid counts)
+
+**How it works:** Each map's tiles are normalized into a
+`{"relX,relY": tileHash}` map (same normalization as before, just kept
+as a lookup instead of concatenated into one combined hash). Every pair
+of small maps gets compared via `tileSetSimilarity` -- matching
+(position, hash) pairs divided by the union of all positions either map
+has, so it penalizes both mismatched tile content at a shared position
+and a differently-shaped map. Pairs at or above 90% get merged via a
+union-find, so if A-B and B-C are each individually similar enough (even
+when A-C alone wouldn't clear the threshold), all three still land in
+one group instead of two separate pairs.
+
+**Potential complications:**
+- Verified live against the same `reference-test-data`: the exact-match
+  version had grouped the 8 confirmed spawn zones into four 2-map pairs
+  (5+7, 6+13, 11+14, 12+15). At 90%, three of those pairs (6+13, 11+14,
+  and implicitly whatever connected them) merged into one 4-map group
+  (6, 11, 13, 14), while 5+7 and 12+15 stayed as their own separate
+  pairs -- same 8 maps total, better grouped, and consistent with there
+  being a few genuinely different spawn-seed variants rather than one
+  single template.
+- O(n^2) pairwise comparison across all small-map candidates -- fine at
+  the scale tested (dozens of maps, each tile-set capped at 20 entries
+  by `maxSpawnZoneGrids`), but worth knowing if an instance ever
+  accumulates hundreds of small maps.
