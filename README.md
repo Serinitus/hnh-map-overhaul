@@ -1,7 +1,8 @@
 # HavenMap
 
 Fork of [Cediner/hnh-map-vuetify](https://github.com/Cediner/hnh-map-vuetify), an automapper server for Haven & Hearth.
-Subsequently Fork of Aritian's https://github.com/Aritain/hnh-map-updated
+Subsequently forked from [Aritain/hnh-map-updated](https://github.com/Aritain/hnh-map-updated).
+
 All changes on top of upstream are vibe-coded via Claude.
 
 ## Setup
@@ -24,7 +25,9 @@ The first client to connect sets the 0,0 grid. Wipe data in the admin portal to 
 - `admin`: modify server settings, manage users, wipe data
 
 ## Changelog
-(Aritian Changes)
+
+### Aritain's changes
+
 Changes on top of the upstream fork:
 
 - Roads: draw and label named roads between two points on the map
@@ -40,30 +43,54 @@ Changes on top of the upstream fork:
 - Closer zoom
 - Better icon handling while zooming
 
-(Serinitus Changes)
-Bug Fixes:
+### Serinitus's changes
 
--Minehole/ladder markers no longer should cause issues reguardless of client (Kami, Hurricane) — recognized and rendered correctly regardless of which client uploaded them *warning Nurgling Bug still exists and will crash all others*
--Fixed Clutter/system markers leaking into the Natural Resources panel
--New mine layers now align to their entrance point instead of resetting to (0,0)
--Kami's "Export 2 Mapper" bulk upload now actually works (run it twice — the second pass captures far more than the first)
--Turning off Players now actually stays off (was silently reappearing every 2-second poll)
+Changes on top of `Aritain/hnh-map-updated` (full technical detail --
+files touched, root causes, verification notes -- in `CHANGES.md`):
 
-Public Access & Permissions:
--Per-account control over which map sections (Natural Resources, Thingwalls, Roads, etc.) are visible
-New Public-access mode — share a read-only map with no login required, one master switch
--Per-map "Required Tier" locking
+**Bug fixes**
 
-Personal Settings:
--New /settings page: Players Names, Hide Character Names, and a Thingwall Icon Scale slider (0.25x–4x) — personal preferences instead of admin-managed drawer toggles
+- Minehole/ladder markers no longer cause issues regardless of client
+  (Kami, Hurricane) — recognized and rendered correctly regardless of
+  which client uploaded them. **Warning:** the Nurgling-side crash bug
+  itself is still unfixed upstream and will still crash any non-Nurgling
+  client until that's addressed there.
+- Fixed Clutter/system markers leaking into the Natural Resources panel
+- New mine layers now align to their entrance point instead of resetting
+  to (0,0)
+- Kami's "Export 2 Mapper" bulk upload now actually works (run it twice
+  — the second pass captures far more than the first)
+- Turning off Players now actually stays off (was silently reappearing
+  every 2-second poll)
 
-Drawer Redesign:
--Every toggle is now a green/red icon instead of a switch; Thingwalls/Quest Givers/Players get an independent show/hide-names icon
--One unified search bar replaces four separate Thingwall/NPC/Marker/Player dropdowns — also fixes re-selecting the same result doing nothing
--Natural Resources (renamed from Natural Markers) and Clutter get per-category toggle panels instead of one blanket switch
--Mineholes and Caves split out into their own standalone toggles
--"Draw Road" button replaced with an inline Edit icon next to Roads
--Overlay Map gets its own independent visibility toggle
--Thingwall icons now scale with zoom to match the live server, instead of staying a fixed size
--Layout fixes: app bar spans the full width, drawer no longer overlaps it, row/label alignment cleaned up throughout
--Only Thingwalls and Vortexes are visible by default now
+**Public access & permissions**
+
+- Per-account control over which map sections (Natural Resources,
+  Thingwalls, Roads, etc.) are visible
+- New Public-access mode — share a read-only map with no login
+  required, one master switch
+- Per-map "Required Tier" locking
+
+**Personal settings**
+
+- New `/settings` page: Players Names, Hide Character Names, and a
+  Thingwall Icon Scale slider (0.25x–4x) — personal preferences instead
+  of admin-managed drawer toggles
+
+**Drawer redesign**
+
+- Every toggle is now a green/red icon instead of a switch; Thingwalls/
+  Quest Givers/Players get an independent show/hide-names icon
+- One unified search bar replaces four separate Thingwall/NPC/Marker/
+  Player dropdowns — also fixes re-selecting the same result doing
+  nothing
+- Natural Resources (renamed from Natural Markers) and Clutter get
+  per-category toggle panels instead of one blanket switch
+- Mineholes and Caves split out into their own standalone toggles
+- "Draw Road" button replaced with an inline Edit icon next to Roads
+- Overlay Map gets its own independent visibility toggle
+- Thingwall icons now scale with zoom to match the live server, instead
+  of staying a fixed size
+- Layout fixes: app bar spans the full width, drawer no longer overlaps
+  it, row/label alignment cleaned up throughout
+- Only Thingwalls and Vortexes are visible by default now
