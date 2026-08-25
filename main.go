@@ -125,6 +125,7 @@ func main() {
 	http.HandleFunc("/admin/", m.admin)
 	http.HandleFunc("/admin/user", m.adminUser)
 	http.HandleFunc("/admin/public", m.adminPublic)
+	http.HandleFunc("/admin/generatePublicToken", m.generatePublicToken)
 	http.HandleFunc("/admin/deleteUser", m.deleteUser)
 	http.HandleFunc("/admin/wipe", m.wipe)
 	http.HandleFunc("/admin/setPrefix", m.setPrefix)

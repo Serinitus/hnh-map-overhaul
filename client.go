@@ -41,32 +41,42 @@ func (m *Map) client(rw http.ResponseWriter, req *http.Request) {
 	}
 	auth := false
 	user := ""
+	// A generated Public token (see generatePublicToken in admin.go)
+	// isn't tied to any real account -- it authenticates directly
+	// against PublicConfig instead of the tokens/users buckets below.
+	// user stays "" for this path, same anonymous convention as
+	// getSessionOrPublic elsewhere.
+	if pub := m.getPublicConfig(); pub.Enabled && pub.Token != "" && pub.Token == matches[1] && pub.Auths.Has(AUTH_UPLOAD) {
+		auth = true
+	}
 	u := User{}
-	m.db.View(func(tx *bbolt.Tx) error {
-		tb := tx.Bucket([]byte("tokens"))
-		if tb == nil {
+	if !auth {
+		m.db.View(func(tx *bbolt.Tx) error {
+			tb := tx.Bucket([]byte("tokens"))
+			if tb == nil {
+				return nil
+			}
+			userName := tb.Get([]byte(matches[1]))
+			if userName == nil {
+				return nil
+			}
+			ub := tx.Bucket([]byte("users"))
+			if ub == nil {
+				return nil
+			}
+			userRaw := ub.Get(userName)
+			if userRaw == nil {
+				return nil
+			}
+			//u = User{}
+			json.Unmarshal(userRaw, &u)
+			if u.Auths.Has(AUTH_UPLOAD) {
+				user = string(userName)
+				auth = true
+			}
 			return nil
-		}
-		userName := tb.Get([]byte(matches[1]))
-		if userName == nil {
-			return nil
-		}
-		ub := tx.Bucket([]byte("users"))
-		if ub == nil {
-			return nil
-		}
-		userRaw := ub.Get(userName)
-		if userRaw == nil {
-			return nil
-		}
-		//u = User{}
-		json.Unmarshal(userRaw, &u)
-		if u.Auths.Has(AUTH_UPLOAD) {
-			user = string(userName)
-			auth = true
-		}
-		return nil
-	})
+		})
+	}
 	if !auth {
 		rw.WriteHeader(http.StatusUnauthorized)
 		return

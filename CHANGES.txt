@@ -1308,3 +1308,55 @@ While verifying this, found and fixed a real, independent bug: four separate pla
 **Potential complications:**
 - Verified live: loading the Tokens page at `http://localhost:8083/` now shows the token as `http://localhost:8083/client/{token}` with no prefix ever configured, instead of the old `http://example.com/client/{token}` default.
 - If this server is ever put behind a reverse proxy that doesn't set `X-Forwarded-Proto`/`X-Forwarded-Host`, the scheme could resolve to `http` even when the public-facing connection is actually `https` -- the manual override in admin settings still covers that case, just no longer needed for the common direct-or-standard-proxy setup.
+
+## 34. Redundant nav self-links removed; Tokens page opened up to public visitors with a locked shared token; personal prefix override restored
+
+**What it does:** Three related navigation/access changes.
+
+1. **No more self-referential nav buttons.** The map view's own app-bar always showed a "Map" button even though it's the only page that app-bar ever renders on -- removed outright. The Go-template navbar (Tokens/Admin/Settings/Password/Login pages) always showed a "Tokens" link even while already on the Tokens page -- now hidden via a new `Page.CurrentPath` field, same pattern as before but generalized.
+2. **Tokens page now reachable by public visitors.** Previously `/` unconditionally redirected anyone without a real login straight to `/map/`, so there was no way to see anything token-related without an account. Now: the map view's "Tokens" button (visible to everyone, not just logged-in users, via a new `/?tokens` link) takes a public visitor to a locked, read-only view showing one admin-designated shared token instead of a personal list -- no Generate/Delete/Change-Password controls, just the token line. Typing the bare domain directly (no `?tokens`) still goes straight to the map, unchanged -- only the explicit Tokens link opens the locked view, per the fact that most visits are just "go look at the map."
+3. **Personal prefix override, back but relocated.** Item 33 moved the token-URL prefix from a manually-configured admin setting to auto-detection from the request. This adds a lightweight per-visitor safety valve right on the Tokens page itself: an "Address override" text field, pre-filled with the resolved prefix, that live-edits the displayed token line(s) in the browser (plain JS, nothing sent to the server, nothing saved) -- for the case someone's own network path to the server doesn't match what the server sees. Shown to every visitor, including the locked public view.
+
+**Why:** All directly requested. The public-token piece needed a real "shared token" concept that didn't exist before -- `PublicConfig.Token`, a real token from some account's Tokens page (with Upload permission) that the admin explicitly designates for public advertising; upload permission still comes entirely from whichever real account generated it, this field is purely what gets displayed to anonymous visitors.
+
+**Files:** `main.go` (`Page.CurrentPath`, `PublicConfig.Token`), `admin.go` (`adminPublic` saves the new `token` form field), `manage.go` (`index` handler: public+no-session case now serves a locked view gated behind `?tokens` instead of always redirecting), `templates/navbar.tmpl` (Tokens link hidden on `CurrentPath == "/"`), `templates/index.tmpl` (`Locked` mode hides Change Password/Generate Token, adds the token-line data attributes + override input/script), `templates/admin/public.tmpl` (new Token field), `frontend/src/components/MapView.vue` (Map button removed, Tokens button un-gated from `isPublic` and pointed at `/?tokens`)
+
+**How it works:**
+- `Page.CurrentPath` is set from `req.URL.Path` in `getPage`, `json:"-"` since it's render-only, never persisted.
+- The locked Tokens view builds a `Session{Auths: pub.Auths}` (empty Username, matching the existing `getSessionOrPublic` convention) so the same `{{if .Session.Auths.Has "upload"}}` gate index.tmpl already had for real users applies identically here -- the admin has to have checked "Upload" under Public's Roles for the token section to render at all, same requirement as any other Public-auth-gated feature.
+- The override input's `input` listener rewrites every `.token-line` element's text using its `data-token` attribute plus whatever the field currently holds, trimming trailing slashes -- purely cosmetic/local, the actual `{{$.Prefix}}` server-rendered value is untouched and is what a fresh page load always shows again.
+
+**Potential complications:**
+- Verified the entire flow live: navbar Tokens link disappears while already on `/`; admin's own token page unaffected; after enabling Public with Upload checked and setting a real generated token as the shared Token, logging out and visiting bare `/` redirected to `/map/#/` as before, the map app-bar showed only Tokens (no Map) + Login, and following Tokens (`/?tokens`) rendered the locked page with the correct token line, no Change Password/Generate Token controls, and the override field live-updating the displayed line on input.
+- The shared public token is exactly as sensitive as any other upload token -- anyone who can view the public Tokens page can now also see and use it. That's the intended behavior (it's meant to be shared), but worth remembering it's not scoped or rate-limited differently from a personal token just because it's labeled "public".
+
+## 35. Item 34 follow-up fixes: overlapping label, blank navbar for public visitors, cave icon size
+
+**What it does:** Three small fixes caught while using item 34 live.
+
+1. **Overlapping text**: the Tokens page's new "Address override" field had a long, sentence-length `<label>` -- Materialize only reserves one line of space above an input for its shrunk/active label, so the wrapped second line visually collided with the input's value below it. Shortened the label to two words and moved the explanation to a plain paragraph above the field instead.
+2. **Blank navbar for public visitors**: the account-menu trigger in the top-right of every Go-template page shows `{{.Session.Username}}` -- blank for an anonymous public visitor (empty string), rather than something indicating you're not logged in. Now shows a plain "Login" link instead of an empty dropdown trigger when there's no real username, mirroring the pattern the map view's own app-bar already used.
+3. **Cave icons now match Mineshaft's smaller size**: `buildIcon` in `Marker.js` sized Mineshaft (minehole/ladder) markers at a fixed 13.5, smaller than every other marker type's 18 default -- Cave markers were still falling into that 18 default. Now sized the same as Mineshaft.
+
+**Why:** All three caught/requested directly while testing item 34 and the map view.
+
+**Files:** `templates/index.tmpl` (label fix), `templates/navbar.tmpl` (Login link fix), `frontend/src/data/Marker.js` (`hsz` ternary now includes `isCave` alongside `isMineshaft`)
+
+**How it works:** No new mechanisms -- (1) and (3) are template/formula tweaks; (2) wraps both the account-menu `<li>` and the entire `#navbar-user-dropdown` list in `{{if .Session.Username}}`, since an anonymous session has nothing sensible to put in Admin/Settings/Logout anyway.
+
+**Potential complications:**
+- Verified live: the Tokens page label no longer wraps into the input; the public locked Tokens page's navbar now shows "Login" instead of a blank dropdown trigger. Cave icon sizing verified by code review (mirrors the existing, already-shipped Mineshaft path exactly) but not visually confirmed against a real cave marker in this session's test data.
+
+## 36. One-click public upload token, not tied to any account
+
+**What it does:** Adds a "Generate Public Token" button on the Public settings page (`/admin/public`) that creates a fresh random token and sets it as `PublicConfig.Token` directly -- no need to create (or borrow) a real user account just to own a token to paste in there, which is how item 34's public token had to be set up. `client()` in `client.go` now checks an incoming `/client/{token}/...` request against `PublicConfig.Token` first (only valid when Public is Enabled and its Auths include Upload); only if that doesn't match does it fall back to the existing tokens/users bucket lookup. A request authenticated this way carries an empty username through `context.WithValue(UserInfo, ...)`, same anonymous convention used elsewhere (`getSessionOrPublic`) -- so any player-name-dependent feature (e.g. the entrance-marker-naming best-effort logic in `gridUpdate`) just sees a blank name unless the uploading client itself reports one in its own payload, same as it would for any other unnamed/unattributed upload.
+
+**Why:** Directly requested -- the previous flow required creating a real account, generating a token under it the normal way, then copying that token into the Public settings field, purely to get something to paste in. That's a real account existing for no reason other than owning one token.
+
+**Files:** `admin.go` (`crypto/rand`/`encoding/hex` imports, `generatePublicToken` new handler), `client.go` (`client()`'s auth check tries `PublicConfig.Token` before the tokens/users buckets), `main.go` (route registration), `templates/admin/public.tmpl` (button, updated help text)
+
+**How it works:** `generatePublicToken` generates the same 16-byte-random-hex token `generateToken` (manage.go) already used for real accounts, but writes it straight into the `config` bucket's `public` record instead of a `users` entry, and never touches the `tokens` bucket at all -- there's no username for a `tokens` bucket entry to point at. `client()` checks this fast path first (`pub.Token == matches[1]`), falling through to the original per-account lookup only if it doesn't match, so pasting in a real account's token (still supported) works exactly as before.
+
+**Potential complications:**
+- Verified live: generated a fresh token via the new button, confirmed it differed from a previously-set real-account token; hit `/client/{new-token}/locate?gridID=nonexistent` and got a 404 (passed auth, reached the real handler) instead of 401; confirmed a garbage token still gets 401, so the check is actually discriminating.
+- If multiple real players ever upload concurrently through the same shared public token, they all share the empty-string key in the server's short-lived `lastPos` map (used only for the best-effort "which map did this cave connect from" entrance-marker heuristic) -- at most a slightly-wrong guessed entrance marker in that edge case, not a data-integrity issue; not worth solving unless it turns out to matter in practice.

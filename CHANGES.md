@@ -1346,3 +1346,17 @@ While verifying this, found and fixed a real, independent bug: four separate pla
 
 **Potential complications:**
 - Verified live: the Tokens page label no longer wraps into the input; the public locked Tokens page's navbar now shows "Login" instead of a blank dropdown trigger. Cave icon sizing verified by code review (mirrors the existing, already-shipped Mineshaft path exactly) but not visually confirmed against a real cave marker in this session's test data.
+
+## 36. One-click public upload token, not tied to any account
+
+**What it does:** Adds a "Generate Public Token" button on the Public settings page (`/admin/public`) that creates a fresh random token and sets it as `PublicConfig.Token` directly -- no need to create (or borrow) a real user account just to own a token to paste in there, which is how item 34's public token had to be set up. `client()` in `client.go` now checks an incoming `/client/{token}/...` request against `PublicConfig.Token` first (only valid when Public is Enabled and its Auths include Upload); only if that doesn't match does it fall back to the existing tokens/users bucket lookup. A request authenticated this way carries an empty username through `context.WithValue(UserInfo, ...)`, same anonymous convention used elsewhere (`getSessionOrPublic`) -- so any player-name-dependent feature (e.g. the entrance-marker-naming best-effort logic in `gridUpdate`) just sees a blank name unless the uploading client itself reports one in its own payload, same as it would for any other unnamed/unattributed upload.
+
+**Why:** Directly requested -- the previous flow required creating a real account, generating a token under it the normal way, then copying that token into the Public settings field, purely to get something to paste in. That's a real account existing for no reason other than owning one token.
+
+**Files:** `admin.go` (`crypto/rand`/`encoding/hex` imports, `generatePublicToken` new handler), `client.go` (`client()`'s auth check tries `PublicConfig.Token` before the tokens/users buckets), `main.go` (route registration), `templates/admin/public.tmpl` (button, updated help text)
+
+**How it works:** `generatePublicToken` generates the same 16-byte-random-hex token `generateToken` (manage.go) already used for real accounts, but writes it straight into the `config` bucket's `public` record instead of a `users` entry, and never touches the `tokens` bucket at all -- there's no username for a `tokens` bucket entry to point at. `client()` checks this fast path first (`pub.Token == matches[1]`), falling through to the original per-account lookup only if it doesn't match, so pasting in a real account's token (still supported) works exactly as before.
+
+**Potential complications:**
+- Verified live: generated a fresh token via the new button, confirmed it differed from a previously-set real-account token; hit `/client/{new-token}/locate?gridID=nonexistent` and got a 404 (passed auth, reached the real handler) instead of 401; confirmed a garbage token still gets 401, so the check is actually discriminating.
+- If multiple real players ever upload concurrently through the same shared public token, they all share the empty-string key in the server's short-lived `lastPos` map (used only for the best-effort "which map did this cave connect from" entrance-marker heuristic) -- at most a slightly-wrong guessed entrance marker in that edge case, not a data-integrity issue; not worth solving unless it turns out to matter in practice.

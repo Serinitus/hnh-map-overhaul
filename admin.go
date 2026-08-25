@@ -2,6 +2,8 @@ package main
 
 import (
 	"archive/zip"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -261,6 +263,47 @@ func (m *Map) adminPublic(rw http.ResponseWriter, req *http.Request) {
 		Config:         m.getPublicConfig(),
 		SectionOptions: sectionOptions,
 	})
+}
+
+// generatePublicToken creates a fresh random token and sets it as
+// PublicConfig.Token directly -- unlike a normal user token (see
+// generateToken in manage.go), it isn't tied to any account at all;
+// client() in client.go authenticates it by matching PublicConfig.Token
+// directly instead of looking it up in the tokens/users buckets. Lets
+// an admin set up public uploading in one click instead of having to
+// create a whole separate account just to own a token to paste in here.
+func (m *Map) generatePublicToken(rw http.ResponseWriter, req *http.Request) {
+	s := m.getSession(req)
+	if s == nil || !s.Auths.Has(AUTH_ADMIN) {
+		http.Redirect(rw, req, "/", 302)
+		return
+	}
+	tokenRaw := make([]byte, 16)
+	if _, err := rand.Read(tokenRaw); err != nil {
+		http.Error(rw, "internal error", http.StatusInternalServerError)
+		return
+	}
+	token := hex.EncodeToString(tokenRaw)
+
+	err := m.db.Update(func(tx *bbolt.Tx) error {
+		b, err := tx.CreateBucketIfNotExists([]byte("config"))
+		if err != nil {
+			return err
+		}
+		cfg := m.getPublicConfig()
+		cfg.Token = token
+		raw, err := json.Marshal(cfg)
+		if err != nil {
+			return err
+		}
+		return b.Put([]byte("public"), raw)
+	})
+	if err != nil {
+		log.Println(err)
+		http.Error(rw, "internal error", http.StatusInternalServerError)
+		return
+	}
+	http.Redirect(rw, req, "/admin/public", 302)
 }
 
 func (m *Map) wipe(rw http.ResponseWriter, req *http.Request) {
