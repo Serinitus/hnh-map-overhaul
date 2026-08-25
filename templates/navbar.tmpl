@@ -15,6 +15,7 @@
 </nav>
 <ul id="navbar-user-dropdown" class="dropdown-content">
     {{if .Session.Auths.Has "admin"}}<li><a href="/admin">Admin</a></li>{{end}}
+    <li><a href="/settings">Settings</a></li>
     <li><a href="/logout">Logout</a></li>
 </ul>
 <script>

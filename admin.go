@@ -18,6 +18,53 @@ import (
 	"golang.org/x/crypto/bcrypt"
 )
 
+// TierOption is one choice in the "required tier" dropdowns for both map
+// layers and settings-drawer sections -- both reuse the same Auths values
+// (see AUTH_GROUP1-5 etc in main.go) as the tier vocabulary.
+type TierOption struct {
+	Value string
+	Label string
+}
+
+var tierOptions = []TierOption{
+	{"", "None"},
+	{AUTH_GROUP1, "Group 1"},
+	{AUTH_GROUP2, "Group 2"},
+	{AUTH_GROUP3, "Group 3"},
+	{AUTH_GROUP4, "Group 4"},
+	{AUTH_GROUP5, "Group 5"},
+	{"writer", "Redactor"},
+	{AUTH_ADMIN, "Admin"},
+}
+
+// SectionOption is one Markers-panel section that can be granted per
+// account, the same way Roles (Map/Markers/Admin/etc) already are. Key
+// must match the section key used in MapView.vue's canSeeSection() calls;
+// the checkbox itself is stored as an ordinary Auths entry "sec_<Key>", so
+// no separate storage/admin plumbing is needed beyond this list -- adding
+// a new section here is enough to make it a new per-account toggle.
+type SectionOption struct {
+	Key   string
+	Label string
+}
+
+// Players/Characters is deliberately absent here: unlike every other
+// section, it's already gated by a real, server-enforced auth (AUTH_POINTER
+// aka "Characters" in Roles, see getChars in map.go) -- a second sec_players
+// checkbox would just be a UI switch that has to agree with a data-access
+// switch to do anything, so MapView.vue's Players toggle checks
+// auths.includes("point") directly instead of going through this list.
+var sectionOptions = []SectionOption{
+	{"naturalMarkers", "Natural Resources"},
+	{"customMarkers", "Custom Markers"},
+	{"clutter", "Clutter"},
+	{"thingwalls", "Thingwalls"},
+	{"vortexes", "Vortexes"},
+	{"questGivers", "Quest Givers"},
+	{"roads", "Roads"},
+	{"other", "Other"},
+}
+
 func (m *Map) admin(rw http.ResponseWriter, req *http.Request) {
 	s := m.getSession(req)
 	if s == nil || !s.Auths.Has(AUTH_ADMIN) {
@@ -67,23 +114,27 @@ func (m *Map) admin(rw http.ResponseWriter, req *http.Request) {
 	}
 
 	m.ExecuteTemplate(rw, filepath.FromSlash("admin/index.tmpl"), struct {
-		Page        Page
-		Session     *Session
-		Users       []string
-		Prefix      string
-		DefaultHide bool
-		Maps        []MapInfo
-		PingSounds  []string
-		PingSound   string
+		Page          Page
+		Session       *Session
+		Users         []string
+		Prefix        string
+		DefaultHide   bool
+		Maps          []MapInfo
+		PingSounds    []string
+		PingSound     string
+		TierOptions   []TierOption
+		PublicEnabled bool
 	}{
-		Page:        m.getPage(req),
-		Session:     s,
-		Users:       users,
-		Prefix:      prefix,
-		DefaultHide: defaultHide,
-		Maps:        maps,
-		PingSounds:  pingSounds,
-		PingSound:   pingSound,
+		Page:          m.getPage(req),
+		Session:       s,
+		Users:         users,
+		Prefix:        prefix,
+		DefaultHide:   defaultHide,
+		Maps:          maps,
+		PingSounds:    pingSounds,
+		PingSound:     pingSound,
+		TierOptions:   tierOptions,
+		PublicEnabled: m.getPublicConfig().Enabled,
 	})
 }
 
@@ -146,15 +197,62 @@ func (m *Map) adminUser(rw http.ResponseWriter, req *http.Request) {
 	})
 
 	m.ExecuteTemplate(rw, filepath.FromSlash("admin/user.tmpl"), struct {
-		Page     Page
-		Session  *Session
-		User     User
-		Username string
+		Page           Page
+		Session        *Session
+		User           User
+		Username       string
+		SectionOptions []SectionOption
 	}{
-		Page:     m.getPage(req),
-		Session:  s,
-		User:     u,
-		Username: user,
+		Page:           m.getPage(req),
+		Session:        s,
+		User:           u,
+		Username:       user,
+		SectionOptions: sectionOptions,
+	})
+}
+
+// adminPublic edits the singleton "Public" settings (see PublicConfig in
+// main.go) -- not a row in the users bucket, so it has no username,
+// password, or delete action, just an Enabled switch plus the same
+// Roles/Markers checkboxes a normal account gets.
+func (m *Map) adminPublic(rw http.ResponseWriter, req *http.Request) {
+	s := m.getSession(req)
+	if s == nil || !s.Auths.Has(AUTH_ADMIN) {
+		http.Redirect(rw, req, "/", 302)
+		return
+	}
+
+	if req.Method == "POST" {
+		req.ParseForm()
+		cfg := PublicConfig{
+			Enabled: req.FormValue("enabled") != "",
+			Auths:   req.Form["auths"],
+		}
+		m.db.Update(func(tx *bbolt.Tx) error {
+			b, err := tx.CreateBucketIfNotExists([]byte("config"))
+			if err != nil {
+				return err
+			}
+			raw, err := json.Marshal(cfg)
+			if err != nil {
+				return err
+			}
+			return b.Put([]byte("public"), raw)
+		})
+		http.Redirect(rw, req, "/admin", 302)
+		return
+	}
+
+	m.ExecuteTemplate(rw, filepath.FromSlash("admin/public.tmpl"), struct {
+		Page           Page
+		Session        *Session
+		Config         PublicConfig
+		SectionOptions []SectionOption
+	}{
+		Page:           m.getPage(req),
+		Session:        s,
+		Config:         m.getPublicConfig(),
+		SectionOptions: sectionOptions,
 	})
 }
 
@@ -1196,6 +1294,7 @@ func (m *Map) adminMap(rw http.ResponseWriter, req *http.Request) {
 		name := req.FormValue("name")
 		hidden := !(req.FormValue("hidden") == "")
 		priority := !(req.FormValue("priority") == "")
+		requiredAuth := req.FormValue("requiredAuth")
 
 		m.db.Update(func(tx *bbolt.Tx) error {
 			maps, err := tx.CreateBucketIfNotExists([]byte("maps"))
@@ -1210,6 +1309,7 @@ func (m *Map) adminMap(rw http.ResponseWriter, req *http.Request) {
 			mapinfo.Name = name
 			mapinfo.Hidden = hidden
 			mapinfo.Priority = priority
+			mapinfo.RequiredAuth = requiredAuth
 			rawmap, err = json.Marshal(mapinfo)
 			if err != nil {
 				return err
@@ -1231,12 +1331,14 @@ func (m *Map) adminMap(rw http.ResponseWriter, req *http.Request) {
 	})
 
 	m.ExecuteTemplate(rw, filepath.FromSlash("admin/map.tmpl"), struct {
-		Page    Page
-		Session *Session
-		MapInfo MapInfo
+		Page        Page
+		Session     *Session
+		MapInfo     MapInfo
+		TierOptions []TierOption
 	}{
-		Page:    m.getPage(req),
-		Session: s,
-		MapInfo: mi,
+		Page:        m.getPage(req),
+		Session:     s,
+		MapInfo:     mi,
+		TierOptions: tierOptions,
 	})
 }

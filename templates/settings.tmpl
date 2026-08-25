@@ -1,0 +1,74 @@
+<!doctype html>
+<html>
+	<head>
+		<meta charset="utf-8">
+		<meta name="viewport" content="width=device-width, initial-scale=1, shrink-to-fit=no">
+		<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/materialize/1.0.0/css/materialize.min.css">
+		<link href="https://fonts.googleapis.com/icon?family=Material+Icons" rel="stylesheet">
+		<link rel="stylesheet" href="/js/dark.css">
+		<style>
+		</style>
+        <title>{{.Page.Title}}</title>
+	</head>
+	<body>
+		{{template "navbar.tmpl" .}}
+		<div class="container">
+            <form method="POST">
+                <div class="col s12">
+                    <ul class="collection with-header">
+                        <li class="collection-header">
+                            <h6>Character Display</h6>
+                            <p>Personal preferences for how other players' characters show
+                                up on the map for you. Only relevant if your account has the
+                                Characters role -- ask an admin if you don't see anything
+                                below this line.</p>
+                        </li>
+                        {{if .Session.Auths.Has "point"}}
+                        <li class="collection-item">
+                            <label>
+                                <input type="checkbox" name="showPlayerNames" value="true"{{if .ShowPlayerNames}} checked="checked"{{end}}/>
+                                <span>Players Names</span>
+                            </label>
+                        </li>
+                        <li class="collection-item">
+                            <label>
+                                <input type="checkbox" name="hideCharacterNames" value="true"{{if .HideCharacterNames}} checked="checked"{{end}}/>
+                                <span>Hide Character Names</span>
+                            </label>
+                        </li>
+                        {{else}}
+                        <li class="collection-item">
+                            <i>Your account doesn't have the Characters role, so there's
+                                nothing to configure here yet.</i>
+                        </li>
+                        {{end}}
+                    </ul>
+                </div>
+                <div class="col s12">
+                    <ul class="collection with-header">
+                        <li class="collection-header">
+                            <h6>Map Display</h6>
+                        </li>
+                        <li class="collection-item">
+                            <p>Thingwall Icon Scale --
+                                <output id="thingwallScaleValue">{{printf "%.2f" .ThingwallScale}}</output>x
+                            </p>
+                            <p>Multiplier on top of the live-server default, which already
+                                shrinks Thingwall icons as you zoom out. 1.00x is that
+                                default unmodified; lower for smaller icons, higher for
+                                larger.</p>
+                            <div class="range-field">
+                                <input type="range" name="thingwallScale" min="0.25" max="4" step="0.05"
+                                       value="{{printf "%.2f" .ThingwallScale}}"
+                                       oninput="document.getElementById('thingwallScaleValue').value = parseFloat(this.value).toFixed(2)"/>
+                            </div>
+                        </li>
+                    </ul>
+                </div>
+                <button class="btn waves-effect waves-light" type="submit" name="action">Save</button>
+            </form>
+		</div>
+        <script src="https://cdnjs.cloudflare.com/ajax/libs/materialize/1.0.0/js/materialize.min.js"></script>
+        <script>M.AutoInit();</script>
+	</body>
+</html>

@@ -19,7 +19,7 @@ type CustomMarker struct {
 }
 
 func (m *Map) getCustomMarkers(rw http.ResponseWriter, req *http.Request) {
-	s := m.getSession(req)
+	s := m.getSessionOrPublic(req)
 	if s == nil || !s.Auths.Has(AUTH_MAP) {
 		rw.WriteHeader(http.StatusUnauthorized)
 		return

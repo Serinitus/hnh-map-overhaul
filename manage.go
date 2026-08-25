@@ -23,6 +23,10 @@ func clientIP(req *http.Request) string {
 func (m *Map) index(rw http.ResponseWriter, req *http.Request) {
 	s := m.getSession(req)
 	if s == nil {
+		if m.getPublicConfig().Enabled {
+			http.Redirect(rw, req, "/map/", 302)
+			return
+		}
 		http.Redirect(rw, req, "/login", 302)
 		return
 	}
@@ -80,7 +84,7 @@ func (m *Map) login(rw http.ResponseWriter, req *http.Request) {
 				TempAdmin: u.Auths.Has("tempadmin"),
 			}
 			m.saveSession(s)
-			http.Redirect(rw, req, "/", 302)
+			http.Redirect(rw, req, "/map/", 302)
 			return
 		}
 	}
@@ -95,6 +99,10 @@ func (m *Map) logout(rw http.ResponseWriter, req *http.Request) {
 	s := m.getSession(req)
 	if s != nil {
 		m.deleteSession(s)
+	}
+	if m.getPublicConfig().Enabled {
+		http.Redirect(rw, req, "/map/", 302)
+		return
 	}
 	http.Redirect(rw, req, "/login", 302)
 	return

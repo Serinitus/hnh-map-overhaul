@@ -58,13 +58,13 @@ export class Character {
         }
     }
 
-    update(mapview, updated) {
+    update(mapview, updated, visible) {
         if (this.map !== updated.map) {
             this.remove(mapview);
         }
         this.map = updated.map;
         this.position = updated.position;
-        if (!this.marker && this.map === mapview.mapid) {
+        if (!this.marker && visible && this.map === mapview.mapid) {
             this.add(mapview);
         }
         if (this.marker) {

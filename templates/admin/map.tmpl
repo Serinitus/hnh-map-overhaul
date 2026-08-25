@@ -37,6 +37,14 @@
                         </li>
                     </ul>
                 </div>
+                <div class="input-field col s12">
+                    <select name="requiredAuth">
+                        {{range .TierOptions}}
+                        <option value="{{.Value}}"{{if eq .Value $.MapInfo.RequiredAuth}} selected="selected"{{end}}>{{.Label}}</option>
+                        {{end}}
+                    </select>
+                    <label>Required Tier</label>
+                </div>
                 <button class="btn waves-effect waves-light" type="submit" name="action">Save</button>
             </form>
 		</div>

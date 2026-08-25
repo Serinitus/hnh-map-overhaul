@@ -5,8 +5,11 @@
       <span style="font-size:1.25rem;"><span style="color:#FF9800;">Haven</span><span style="color:#fff;">Map</span></span>
       <v-spacer></v-spacer>
       <v-btn text href="/map" class="mr-2">Map</v-btn>
-      <v-btn text href="/" class="mr-4">Tokens</v-btn>
-      <v-menu open-on-hover offset-y>
+      <v-btn v-if="!isPublic" text href="/" class="mr-4">Tokens</v-btn>
+      <v-btn v-if="isPublic" text href="/login">
+        Login
+      </v-btn>
+      <v-menu v-else open-on-hover offset-y>
         <template v-slot:activator="{ on, attrs }">
           <v-btn text v-bind="attrs" v-on="on">
             {{ username }}
@@ -17,6 +20,9 @@
           <v-list-item v-if="auths.includes('admin')" href="/admin">
             <v-list-item-title>Admin</v-list-item-title>
           </v-list-item>
+          <v-list-item href="/settings">
+            <v-list-item-title>Settings</v-list-item-title>
+          </v-list-item>
           <v-list-item href="/logout">
             <v-list-item-title>Logout</v-list-item-title>
           </v-list-item>
@@ -26,6 +32,7 @@
 
     <v-navigation-drawer
         :mini-variant.sync="mini"
+        :mini-variant-width="36"
         app
         style="z-index: 1000"
         prominent>
@@ -42,8 +49,108 @@
       <v-divider></v-divider>
 
       <v-list dense v-if="!mini">
-        <!-- TO MAP -->
+        <!-- Unified search across Thingwalls/Quest Givers/Custom Markers/
+             Players -- replaces four separate dropdowns. Selection is
+             handled entirely through @change, not a v-model watcher, so
+             re-selecting the same single result (e.g. only one player
+             online) always re-homes instead of silently no-oping because
+             Vue sees no value change. -->
         <v-list-item>
+          <v-list-item-content>
+            <v-list-item-title>
+              <v-autocomplete return-object outlined dense clearable
+                              :items="searchItems" item-text="name"
+                              v-model="searchSelection" @change="jumpToSearchResult"
+                              placeholder="Search">
+                <template v-slot:item="data">
+                  <div style="display:flex;align-items:center;width:100%;overflow:hidden;">
+                    <img v-if="data.item.icon" class="mr-2" style="width:24px;height:24px;flex-shrink:0;" :src="data.item.icon"/>
+                    <v-icon v-else class="mr-2">mdi-account</v-icon>
+                    <span style="flex-grow:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">{{ data.item.name }}</span>
+                    <span style="opacity:0.6;font-size:0.75em;margin-left:8px;flex-shrink:0;">{{ data.item.typeLabel }}</span>
+                  </div>
+                </template>
+              </v-autocomplete>
+            </v-list-item-title>
+          </v-list-item-content>
+        </v-list-item>
+
+        <!-- HIDE GRID -->
+        <v-list-item>
+          <v-list-item-content>
+            <v-list-item-title style="display:flex;align-items:center;">
+              <div class="row-icons">
+                <icon-toggle v-model="showGridCoordinates" title="Show/hide"></icon-toggle>
+              </div>
+              <span>Grid Coordinates</span>
+            </v-list-item-title>
+          </v-list-item-content>
+        </v-list-item>
+
+        <!-- Test row for the dual-icon pattern: eye controls visibility,
+             the comment-bubble icon controls whether names stay pinned
+             above each marker. -->
+        <v-list-item v-if="canSeeSection('thingwalls')">
+          <v-list-item-content>
+            <v-list-item-title style="display:flex;align-items:center;">
+              <div class="row-icons">
+                <icon-toggle v-model="showThingwalls" class="mr-2" title="Show/hide"></icon-toggle>
+                <icon-toggle v-model="showThingwallNames" title="Show/hide names"
+                             on-icon="mdi-comment-check-outline" off-icon="mdi-comment-remove-outline"></icon-toggle>
+              </div>
+              <span>Thingwalls</span>
+              <v-spacer></v-spacer>
+              <div class="row-marker-icons">
+                <img src="gfx/terobjs/mm/thingwall.png" style="width:20px;height:20px;"/>
+              </div>
+            </v-list-item-title>
+          </v-list-item-content>
+        </v-list-item>
+
+        <v-list-item v-if="canSeeSection('vortexes')">
+          <v-list-item-content>
+            <v-list-item-title style="display:flex;align-items:center;">
+              <div class="row-icons">
+                <icon-toggle v-model="showVortexes" title="Show/hide"></icon-toggle>
+              </div>
+              <span>Vortexes</span>
+              <v-spacer></v-spacer>
+              <div class="row-marker-icons">
+                <img src="gfx/terobjs/mm/watervortex.png" style="width:20px;height:20px;"/>
+              </div>
+            </v-list-item-title>
+          </v-list-item-content>
+        </v-list-item>
+
+        <!-- MAP (Jump To Map / Overlay Map) -- same expand-chevron pattern
+             as Natural Resources/Other/Clutter, grouping the two map-select
+             controls that used to sit bare at the top of the drawer.
+             Framed with top/bottom border lines (and margin outside them,
+             so the lines read as separation from neighboring rows rather
+             than sitting flush against them) to set it apart as its own
+             region, left-aligned like every other row. -->
+        <v-list-item style="border-top:1px solid white;border-bottom:1px solid white;margin:10px 0;padding-top:6px !important;padding-bottom:6px !important;">
+          <v-list-item-content>
+            <v-list-item-title style="display:flex;align-items:center;">
+              <!-- Narrower than the standard 64px .row-icons gutter --
+                   Map has no eye toggle of its own, so this lines its
+                   label up with where a row's *second* icon (e.g. the
+                   show/hide-names icon on Thingwalls) would sit, one
+                   icon-width in, rather than the full two-icon width. -->
+              <div style="width:32px;flex-shrink:0;"></div>
+              <div style="display:flex;align-items:center;flex-grow:1;cursor:pointer;"
+                   @click="mapSectionExpanded = !mapSectionExpanded">
+                <span style="font-size:15px;">Map</span>
+                <v-spacer></v-spacer>
+                <v-icon title="Expand/collapse">
+                  {{ mapSectionExpanded ? 'mdi-chevron-up' : 'mdi-chevron-down' }}
+                </v-icon>
+              </div>
+            </v-list-item-title>
+          </v-list-item-content>
+        </v-list-item>
+
+        <v-list-item v-if="mapSectionExpanded">
           <v-list-item-content>
             <v-list-item-title>
               <label class="title">Jump To Map</label>
@@ -53,171 +160,256 @@
           </v-list-item-content>
         </v-list-item>
 
-        <!-- SELECT OVERLAY -->
-        <v-list-item>
+        <v-list-item v-if="mapSectionExpanded">
           <v-list-item-content>
             <v-list-item-title>
-              <label class="title">Overlay Map</label>
+              <label class="title" style="display:flex;align-items:center;">
+                <!-- Independent of which map is picked below: toggling
+                     this off hides the overlay (overlayLayer.map = -1)
+                     without clearing the dropdown selection, so turning
+                     it back on restores the same overlay instantly. -->
+                <div class="row-icons">
+                  <icon-toggle v-model="showOverlayMap" title="Show/hide"></icon-toggle>
+                </div>
+                <span>Overlay Map</span>
+              </label>
               <v-autocomplete return-object outlined dense :items="maps" v-model="overlayMap"
                               placeholder="Select Map"></v-autocomplete>
             </v-list-item-title>
           </v-list-item-content>
         </v-list-item>
 
-        <v-list-item>
-          <v-list-item-content>
-            <v-list-item-title>
-              <!--              <label class="title">Thingwalls</label>-->
-              <v-autocomplete return-object outlined dense :items="thingMarks" v-model="selectedThing"
-                              placeholder="Select Thingwall">
-
-                <template v-slot:item="data">
-                  <img class="mr-2" style="width:24px;height: 24px;" :src="data.item.image + '.png'"/>
-                  {{ data.item.name }}
-                </template>
-              </v-autocomplete>
-            </v-list-item-title>
-          </v-list-item-content>
-        </v-list-item>
-
-        <v-list-item>
-          <v-list-item-content>
-            <v-list-item-title>
-              <!--              <label class="title">Quest Givers</label>-->
-              <v-autocomplete return-object outlined dense :items="questMarks" v-model="selectedQuest"
-                              placeholder="Select NPC">
-
-                <template v-slot:item="data">
-                  <img class="mr-2" style="width:24px;height: 24px;" :src="data.item.image + '.png'"/>
-                  {{ data.item.name }}
-                </template>
-              </v-autocomplete>
-            </v-list-item-title>
-          </v-list-item-content>
-        </v-list-item>
-
-        <v-list-item>
-          <v-list-item-content>
-            <v-list-item-title>
-              <!--              <label class="title">Custom Markers</label>-->
-              <v-autocomplete return-object outlined dense :items="customMarks" v-model="selectedCustomMarker"
-                              placeholder="Select Marker">
-
-                <template v-slot:item="data">
-                  <img class="mr-2" style="width:24px;height: 24px;" :src="'gfx/terobjs/mm/custom_pin_' + data.item.color + '.png'"/>
-                  {{ data.item.name }}
-                </template>
-              </v-autocomplete>
-            </v-list-item-title>
-          </v-list-item-content>
-        </v-list-item>
-
-        <!-- TO PLAYER -->
-        <v-list-item>
-          <v-list-item-content>
-            <v-list-item-title>
-              <!--              <label class="title">Jump to Player</label>-->
-              <v-autocomplete return-object outlined dense :items="players" v-model="selectedPlayer"
-                              placeholder="Select Player">
-              </v-autocomplete>
-            </v-list-item-title>
-          </v-list-item-content>
-        </v-list-item>
-
-        <!-- DRAW ROAD -->
-        <v-list-item v-if="auths.includes('admin') || auths.includes('writer')">
-          <v-list-item-content>
-            <v-list-item-title>
-              <v-btn class="draw-road-btn" width="100%" x-large :color="drawingRoad ? 'primary' : undefined"
-                     @click="toggleDrawRoad">
-                {{ drawingRoad ? 'Cancel Draw Road' : 'Draw Road' }}
-              </v-btn>
-            </v-list-item-title>
-          </v-list-item-content>
-        </v-list-item>
-
-        <v-divider class="my-2"></v-divider>
-
-        <!-- HIDE GRID -->
-        <v-list-item>
-          <v-list-item-content>
-            <v-list-item-title>
-              <toggle-button v-model="showGridCoordinates" label="Grid Coordinates"></toggle-button>
-            </v-list-item-title>
-          </v-list-item-content>
-        </v-list-item>
-
         <!-- HIDE MARKER -->
-        <v-list-item>
+        <v-list-item v-if="canSeeSection('naturalMarkers')">
           <v-list-item-content>
-            <v-list-item-title>
-              <toggle-button v-model="showMarkers" label="Natural Markers"></toggle-button>
+            <v-list-item-title style="display:flex;align-items:center;">
+              <div class="row-icons">
+                <icon-toggle v-model="showMarkers" title="Show/hide"></icon-toggle>
+              </div>
+              <!-- Clickable from the first letter of the label all the way
+                   to the arrow, not just the tiny chevron itself. -->
+              <div style="display:flex;align-items:center;flex-grow:1;cursor:pointer;"
+                   @click="naturalMarkersExpanded = !naturalMarkersExpanded">
+                <span>Natural Resources</span>
+                <v-spacer></v-spacer>
+                <v-icon small title="Expand/collapse">
+                  {{ naturalMarkersExpanded ? 'mdi-chevron-up' : 'mdi-chevron-down' }}
+                </v-icon>
+              </div>
             </v-list-item-title>
           </v-list-item-content>
         </v-list-item>
 
-        <v-list-item>
+        <!-- NATURAL MARKER CATEGORIES (per-type toggle, e.g. Mineshaft, Cave, Burrow) --
+             Expand state is independent of the eye toggle above: showMarkers
+             controls whether these markers render on the map, while
+             naturalMarkersExpanded only controls whether this list is open
+             in the drawer -- collapsing it doesn't hide anything, and
+             hiding the section doesn't force it closed. -->
+        <v-list-item v-if="canSeeSection('naturalMarkers') && naturalMarkersExpanded">
           <v-list-item-content>
             <v-list-item-title>
-              <toggle-button v-model="showThingwalls" label="Thingwalls"></toggle-button>
+              <div style="max-height:260px;overflow-y:auto;">
+                <div v-for="cat in marksCategories" :key="cat"
+                     style="display:flex;align-items:center;justify-content:space-between;">
+                  <span style="display:flex;align-items:center;overflow:hidden;">
+                    <img v-if="resourceCategoryIcons[cat]" class="mr-2"
+                         style="width:20px;height:20px;flex-shrink:0;"
+                         :src="resourceCategoryIcons[cat] + '.png'"/>
+                    <span style="text-overflow:ellipsis;overflow:hidden;white-space:nowrap;">{{ cat }}</span>
+                  </span>
+                  <v-switch dense hide-details class="mt-0 pt-0" style="flex-shrink:0;"
+                            :input-value="selectedResourceTypes.includes(cat)"
+                            @change="toggleResourceType(cat)"></v-switch>
+                </div>
+              </div>
             </v-list-item-title>
           </v-list-item-content>
         </v-list-item>
 
-        <v-list-item>
+        <!-- MINEHOLES / CAVES -- split out of Natural Resources into their
+             own standalone toggles (two separate rows, not one combined
+             toggle). Same auth gate as Natural Resources since it's still
+             that same underlying data, just broken out for clarity. -->
+        <v-list-item v-if="canSeeSection('naturalMarkers')">
           <v-list-item-content>
-            <v-list-item-title>
-              <toggle-button v-model="showQuests" label="Quest Givers"></toggle-button>
+            <v-list-item-title style="display:flex;align-items:center;">
+              <div class="row-icons">
+                <icon-toggle v-model="showMineholes" title="Show/hide"></icon-toggle>
+              </div>
+              <span>Mineholes</span>
+              <v-spacer></v-spacer>
+              <div class="row-marker-icons">
+                <img src="mm/down.png" style="width:20px;height:20px;"/>
+              </div>
             </v-list-item-title>
           </v-list-item-content>
         </v-list-item>
 
-        <v-list-item>
+        <v-list-item v-if="canSeeSection('naturalMarkers')">
           <v-list-item-content>
-            <v-list-item-title>
-              <toggle-button v-model="showPlayers" label="Players"></toggle-button>
+            <v-list-item-title style="display:flex;align-items:center;">
+              <div class="row-icons">
+                <icon-toggle v-model="showCaves" title="Show/hide"></icon-toggle>
+              </div>
+              <span>Caves</span>
+              <v-spacer></v-spacer>
+              <div class="row-marker-icons">
+                <img src="gfx/hud/mmap/cave.png" style="width:20px;height:20px;"/>
+              </div>
             </v-list-item-title>
           </v-list-item-content>
         </v-list-item>
 
-        <v-list-item>
+        <v-list-item v-if="canSeeSection('questGivers')">
           <v-list-item-content>
-            <v-list-item-title>
-              <toggle-button v-model="showRoads" label="Roads"></toggle-button>
+            <v-list-item-title style="display:flex;align-items:center;">
+              <div class="row-icons">
+                <icon-toggle v-model="showQuests" class="mr-2" title="Show/hide"></icon-toggle>
+                <icon-toggle v-model="showQuestNames" title="Show/hide names"
+                             on-icon="mdi-comment-check-outline" off-icon="mdi-comment-remove-outline"></icon-toggle>
+              </div>
+              <span>Quest Givers</span>
             </v-list-item-title>
           </v-list-item-content>
         </v-list-item>
 
-        <v-list-item>
+        <!-- Gated by "point" (the Characters role) directly, not
+             canSeeSection -- getChars() already enforces that auth
+             server-side, so a separate sec_players checkbox would just be
+             a UI switch that has to agree with the real data-access one.
+             The names icon duplicates the /settings page's Players Names
+             preference -- kept in sync via the same showPlayerTooltips
+             model, so either control works and they can't drift apart. -->
+        <v-list-item v-if="auths.includes('point')">
           <v-list-item-content>
-            <v-list-item-title>
-              <toggle-button v-model="showCustomMarkers" label="Custom Markers"></toggle-button>
+            <v-list-item-title style="display:flex;align-items:center;">
+              <div class="row-icons">
+                <icon-toggle v-model="showPlayers" class="mr-2" title="Show/hide"></icon-toggle>
+                <icon-toggle v-model="showPlayerTooltips" title="Show/hide names"
+                             on-icon="mdi-comment-check-outline" off-icon="mdi-comment-remove-outline"></icon-toggle>
+              </div>
+              <span>Players</span>
             </v-list-item-title>
           </v-list-item-content>
         </v-list-item>
 
-        <v-list-item>
+        <v-list-item v-if="canSeeSection('roads')">
           <v-list-item-content>
-            <v-list-item-title>
-              <toggle-button v-model="showPlayerTooltips" label="Players Names"></toggle-button>
+            <v-list-item-title style="display:flex;align-items:center;">
+              <div class="row-icons">
+                <icon-toggle v-model="showRoads" class="mr-2" title="Show/hide"></icon-toggle>
+                <!-- Replaces the old full-width "Draw Road"/"Cancel Draw
+                     Road" button -- same drawingRoad state and
+                     toggleDrawRoad cleanup (clears roadPoints/temp
+                     marker), just as an inline icon like the other rows.
+                     :value/@input instead of v-model since toggleDrawRoad
+                     flips the state itself rather than taking the new
+                     value as a parameter. -->
+                <icon-toggle v-if="auths.includes('admin') || auths.includes('writer')"
+                             :value="drawingRoad" @input="toggleDrawRoad" title="Edit"
+                             on-icon="mdi-note-edit" off-icon="mdi-note-edit-outline"
+                             on-color="primary" off-color="green"></icon-toggle>
+              </div>
+              <span>Roads</span>
+            </v-list-item-title>
+          </v-list-item-content>
+        </v-list-item>
+
+        <v-list-item v-if="canSeeSection('customMarkers')">
+          <v-list-item-content>
+            <v-list-item-title style="display:flex;align-items:center;">
+              <div class="row-icons">
+                <icon-toggle v-model="showCustomMarkers" title="Show/hide"></icon-toggle>
+              </div>
+              <span>Custom Markers</span>
             </v-list-item-title>
           </v-list-item-content>
         </v-list-item>
 
         <!-- HIDE CLUTTER -->
-        <v-list-item>
+        <v-list-item v-if="canSeeSection('clutter')">
           <v-list-item-content>
-            <v-list-item-title>
-              <toggle-button v-model="showClutter" label="Clutter"></toggle-button>
+            <v-list-item-title style="display:flex;align-items:center;">
+              <div class="row-icons">
+                <icon-toggle v-model="showClutter" title="Show/hide"></icon-toggle>
+              </div>
+              <div style="display:flex;align-items:center;flex-grow:1;cursor:pointer;"
+                   @click="clutterExpanded = !clutterExpanded">
+                <span>Clutter</span>
+                <v-spacer></v-spacer>
+                <v-icon small title="Expand/collapse">
+                  {{ clutterExpanded ? 'mdi-chevron-up' : 'mdi-chevron-down' }}
+                </v-icon>
+              </div>
             </v-list-item-title>
           </v-list-item-content>
         </v-list-item>
 
-        <!-- HIDE CHARACTER NAMES -->
-        <v-list-item>
+        <!-- CLUTTER CATEGORIES (burrow, clamreef, flintwash, spawningbed) --
+             turning Clutter on no longer means all of it; each type is its
+             own switch, same pattern as Natural Markers/Other. Expand
+             state is independent of the eye, same reasoning as those two. -->
+        <v-list-item v-if="canSeeSection('clutter') && clutterExpanded">
           <v-list-item-content>
             <v-list-item-title>
-              <toggle-button v-model="hideCharacterNames" label="Hide Character Names"></toggle-button>
+              <div style="max-height:260px;overflow-y:auto;">
+                <div v-for="cat in clutterCategories" :key="cat"
+                     style="display:flex;align-items:center;justify-content:space-between;">
+                  <span style="display:flex;align-items:center;overflow:hidden;">
+                    <img v-if="clutterCategoryIcons[cat]" class="mr-2"
+                         style="width:20px;height:20px;flex-shrink:0;"
+                         :src="clutterCategoryIcons[cat] + '.png'"/>
+                    <span style="text-overflow:ellipsis;overflow:hidden;white-space:nowrap;">{{ cat }}</span>
+                  </span>
+                  <v-switch dense hide-details class="mt-0 pt-0" style="flex-shrink:0;"
+                            :input-value="selectedClutterTypes.includes(cat)"
+                            @change="toggleClutterType(cat)"></v-switch>
+                </div>
+              </div>
+            </v-list-item-title>
+          </v-list-item-content>
+        </v-list-item>
+
+        <!-- UNKNOWN/UNVETTED MARKER TYPES (admin-only; anything not in this
+             Mapper's known-resource allowlist -- see KNOWN_RESOURCE_TYPES --
+             lands here instead of cluttering the Natural Resources panel
+             above with one-off categories from upload noise) -->
+        <v-list-item v-if="canSeeSection('other')">
+          <v-list-item-content>
+            <v-list-item-title style="display:flex;align-items:center;">
+              <div class="row-icons">
+                <icon-toggle v-model="showUnknownMarkers" title="Show/hide"></icon-toggle>
+              </div>
+              <div style="display:flex;align-items:center;flex-grow:1;cursor:pointer;"
+                   @click="otherExpanded = !otherExpanded">
+                <span>Other (Admin)</span>
+                <v-spacer></v-spacer>
+                <v-icon small title="Expand/collapse">
+                  {{ otherExpanded ? 'mdi-chevron-up' : 'mdi-chevron-down' }}
+                </v-icon>
+              </div>
+            </v-list-item-title>
+          </v-list-item-content>
+        </v-list-item>
+
+        <v-list-item v-if="canSeeSection('other') && otherExpanded">
+          <v-list-item-content>
+            <v-list-item-title>
+              <div style="max-height:260px;overflow-y:auto;">
+                <div v-for="cat in unknownCategories" :key="cat"
+                     style="display:flex;align-items:center;justify-content:space-between;">
+                  <span style="display:flex;align-items:center;overflow:hidden;">
+                    <img v-if="unknownCategoryIcons[cat]" class="mr-2"
+                         style="width:20px;height:20px;flex-shrink:0;"
+                         :src="unknownCategoryIcons[cat] + '.png'"/>
+                    <span style="text-overflow:ellipsis;overflow:hidden;white-space:nowrap;">{{ cat }}</span>
+                  </span>
+                  <v-switch dense hide-details class="mt-0 pt-0" style="flex-shrink:0;"
+                            :input-value="selectedUnknownTypes.includes(cat)"
+                            @change="toggleUnknownType(cat)"></v-switch>
+                </div>
+              </div>
             </v-list-item-title>
           </v-list-item-content>
         </v-list-item>
@@ -359,29 +551,71 @@ import {CustomMarker} from "../data/CustomMarker";
 import {UniqueList} from "../data/UniqueList";
 import {Character} from "../data/Character";
 import VueContext from 'vue-context';
-import ToggleButton from './ToggleButton.vue';
+import IconToggle from './IconToggle.vue';
 
 const CLUTTER_TYPES = ["burrow", "clamreef", "flintwash", "spawningbed"];
+
+// Vetted natural-resource/auto-mark categories, cross-checked against
+// another public mapper's own marker legend (public.hearthworld.com).
+// A marker whose type isn't in this list is either a real resource we
+// haven't catalogued yet or upload noise from a client bug -- either way
+// it's routed to the admin-only "Other" section (see KNOWN_RESOURCE_TYPES
+// usage in updateMarkers) instead of cluttering the normal resource panel
+// with one-off categories.
+const KNOWN_RESOURCE_TYPES = [
+  // "mineshaft"/"cave" (merged categories, see MINESHAFT_IMAGES/CAVE_IMAGES
+  // in Marker.js) are intentionally not here -- they're routed to their
+  // own standalone Mineholes & Caves toggle, not this section, see the
+  // it.type === "Mineshaft" || it.type === "Cave" branch in updateMarkers.
+  "abyssalchasm", "amberwash", "windthrow", "batguano", "caveorgan",
+  "clamreef", "claypit", "coralreef", "driftkelp", "fairystone", "flintwash",
+  "geyser", "headwaters", "woodheart", "icespire", "jotunmussel", "lilypadlotus",
+  "rockcrystal", "saltbasin", "tarpit",
+  "irminsul", "monolith", "allies", "enemys", "quality",
+];
 
 export default {
   name: "MapView",
   components: {
     ModelSelect,
     VueContext,
-    ToggleButton,
+    IconToggle,
   },
   data: function () {
     return {
       mini: true,
       showGridCoordinates: false,
-      showMarkers: true,
-      showQuests: true,
+      // Thingwalls/Vortexes are the only marker types visible by default
+      // -- every other type's eye toggle starts off, left for the user
+      // to turn on. Name/tooltip preferences (showQuestNames etc.) are a
+      // separate, orthogonal setting from visibility and aren't touched
+      // by this -- they only matter once their section's eye is on.
+      showMarkers: false,
+      showQuests: false,
+      showQuestNames: true,
       showThingwalls: true,
-      showPlayers: true,
+      showThingwallNames: true,
+      showVortexes: true,
+      showPlayers: false,
       showPlayerTooltips: true,
-      showRoads: true,
-      showCustomMarkers: true,
+      showRoads: false,
+      showCustomMarkers: false,
       showClutter: false,
+      selectedClutterTypes: [],
+      clutterExpanded: false,
+      clutterCategories: [],
+      selectedResourceTypes: [],
+      naturalMarkersExpanded: false,
+      // Mineholes and Caves used to be lumped into Natural Resources'
+      // per-category panel alongside every other resource type -- split
+      // into their own simple on/off rows (same pattern as
+      // Vortexes/Custom Markers), two separate toggles rather than one
+      // combined switch.
+      showMineholes: false,
+      showCaves: false,
+      showUnknownMarkers: false,
+      selectedUnknownTypes: [],
+      otherExpanded: false,
       hideCharacterNames: true,
       expandControlPanel: true,
 
@@ -403,21 +637,27 @@ export default {
       // markersCache: [],
       allMarks: [],
       otherMarks: [],
+      otherMarksAdmin: [],
       customMarks: [],
       marksCategories: [],
+      unknownCategories: [],
       thingMarks: [],
+      vortexMarks: [],
+      mineholeMarks: [],
+      caveMarks: [],
       questMarks: [],
       clutterMarks: [],
       players: [],
       maps: [],
       selectedMap: null,
-      selectedCustomMarker: null,
-      selectedQuest: null,
-      selectedThing: null,
-      selectedPlayer: {value: false},
+      searchSelection: null,
       overlayMap: {value: false},
+      showOverlayMap: true,
+      thingwallScale: 1,
+      mapSectionExpanded: true,
       auths: [],
       username: '',
+      isPublic: false,
       mapid: 0,
       coordSetFrom: {x: 0, y: 0},
       coordSet: {
@@ -441,7 +681,29 @@ export default {
       if (!value) {
         this.otherMarks.forEach(it => it.remove(this));
       } else {
-        this.otherMarks.filter(it => it.map === this.mapid || it.map === this.overlayLayer.map).forEach(it => it.add(this));
+        this.otherMarks.filter(it => (it.map === this.mapid || it.map === this.overlayLayer.map) && this.selectedResourceTypes.includes(it.type)).forEach(it => it.add(this));
+      }
+    },
+    selectedResourceTypes() {
+      console.log("selectedResourceTypes", this.selectedResourceTypes);
+      this.otherMarks.forEach(it => it.remove(this));
+      if (this.showMarkers) {
+        this.otherMarks.filter(it => (it.map === this.mapid || it.map === this.overlayLayer.map) && this.selectedResourceTypes.includes(it.type)).forEach(it => it.add(this));
+      }
+    },
+    showUnknownMarkers(value) {
+      console.log("showUnknownMarkers", value);
+      if (!value) {
+        this.otherMarksAdmin.forEach(it => it.remove(this));
+      } else {
+        this.otherMarksAdmin.filter(it => (it.map === this.mapid || it.map === this.overlayLayer.map) && this.selectedUnknownTypes.includes(it.type)).forEach(it => it.add(this));
+      }
+    },
+    selectedUnknownTypes() {
+      console.log("selectedUnknownTypes", this.selectedUnknownTypes);
+      this.otherMarksAdmin.forEach(it => it.remove(this));
+      if (this.showUnknownMarkers) {
+        this.otherMarksAdmin.filter(it => (it.map === this.mapid || it.map === this.overlayLayer.map) && this.selectedUnknownTypes.includes(it.type)).forEach(it => it.add(this));
       }
     },
     showThingwalls(value) {
@@ -451,8 +713,36 @@ export default {
       } else {
         this.thingMarks.filter(it => it.map === this.mapid || it.map === this.overlayLayer.map).forEach(it => {
           it.add(this);
-          it.tooltip(true);
+          it.tooltip(this.showThingwallNames);
         });
+      }
+    },
+    showThingwallNames(value) {
+      console.log("showThingwallNames", value);
+      this.thingMarks.forEach(it => it.tooltip(value));
+    },
+    showVortexes(value) {
+      console.log("showVortexes", value);
+      if (!value) {
+        this.vortexMarks.forEach(it => it.remove(this));
+      } else {
+        this.vortexMarks.filter(it => it.map === this.mapid || it.map === this.overlayLayer.map).forEach(it => it.add(this));
+      }
+    },
+    showMineholes(value) {
+      console.log("showMineholes", value);
+      if (!value) {
+        this.mineholeMarks.forEach(it => it.remove(this));
+      } else {
+        this.mineholeMarks.filter(it => it.map === this.mapid || it.map === this.overlayLayer.map).forEach(it => it.add(this));
+      }
+    },
+    showCaves(value) {
+      console.log("showCaves", value);
+      if (!value) {
+        this.caveMarks.forEach(it => it.remove(this));
+      } else {
+        this.caveMarks.filter(it => it.map === this.mapid || it.map === this.overlayLayer.map).forEach(it => it.add(this));
       }
     },
     showQuests(value) {
@@ -462,16 +752,27 @@ export default {
       } else {
         this.questMarks.filter(it => it.map === this.mapid || it.map === this.overlayLayer.map).forEach(it => {
           it.add(this);
-          it.tooltip(true);
+          it.tooltip(this.showQuestNames);
         });
       }
+    },
+    showQuestNames(value) {
+      console.log("showQuestNames", value);
+      this.questMarks.forEach(it => it.tooltip(value));
     },
     showClutter(value) {
       console.log("showClutter", value);
       if (!value) {
         this.clutterMarks.forEach(it => it.remove(this));
       } else {
-        this.clutterMarks.filter(it => it.map === this.mapid || it.map === this.overlayLayer.map).forEach(it => it.add(this));
+        this.clutterMarks.filter(it => (it.map === this.mapid || it.map === this.overlayLayer.map) && this.selectedClutterTypes.includes(it.type)).forEach(it => it.add(this));
+      }
+    },
+    selectedClutterTypes() {
+      console.log("selectedClutterTypes", this.selectedClutterTypes);
+      this.clutterMarks.forEach(it => it.remove(this));
+      if (this.showClutter) {
+        this.clutterMarks.filter(it => (it.map === this.mapid || it.map === this.overlayLayer.map) && this.selectedClutterTypes.includes(it.type)).forEach(it => it.add(this));
       }
     },
     showPlayers(value) {
@@ -513,12 +814,7 @@ export default {
       if (value !== -1) {
         let character = this.characters.byId(value);
         if (character) {
-          this.changeMap(character.map);
-          let latlng = this.map.unproject([character.position.x, character.position.y], HnHMaxZoom);
-          this.map.setView(latlng, HnHMaxZoom);
-
-          this.$router.push({path: `/character/${value}`});
-          this.autoMode = true;
+          this.jumpToCharacter(value);
         } else {
           this.map.setView([0, 0], HnHMinZoom);
           let mapid = this.maps[0].ID;
@@ -538,32 +834,175 @@ export default {
         this.trackingCharacterId = -1;
       }
     },
-    overlayMap(value) {
+    // Both the selected overlay map and its independent visibility toggle
+    // funnel through the same applyOverlayMap() -- see there for why.
+    overlayMap() {
+      this.applyOverlayMap();
+    },
+    showOverlayMap() {
+      this.applyOverlayMap();
+    },
+  },
+  mounted() {
+    let chars = this.$http.get(`${API_ENDPOINT}/v1/characters`)
+    let maps = this.$http.get(`${API_ENDPOINT}/maps`)
+
+    Promise.all([chars, maps]).then(values => {
+      this.setupMap(values[0].body, values[1].body);
+    }, () => this.$emit("error"));
+  },
+  beforeDestroy: function () {
+    clearInterval(this.intervalId)
+  },
+  computed: {
+    resourceCategoryIcons() {
+      let icons = {};
+      this.otherMarks.forEach(it => {
+        if (!(it.type in icons)) icons[it.type] = it.image;
+      });
+      return icons;
+    },
+    unknownCategoryIcons() {
+      let icons = {};
+      this.otherMarksAdmin.forEach(it => {
+        if (!(it.type in icons)) icons[it.type] = it.image;
+      });
+      return icons;
+    },
+    clutterCategoryIcons() {
+      let icons = {};
+      this.clutterMarks.forEach(it => {
+        if (!(it.type in icons)) icons[it.type] = it.image;
+      });
+      return icons;
+    },
+    // Unified list backing the single search bar that replaced the four
+    // separate Thingwall/NPC/Marker/Player dropdowns.
+    searchItems() {
+      let items = [];
+      this.thingMarks.forEach(it => items.push({searchType: 'thingwall', name: it.name, icon: it.image + '.png', typeLabel: 'Thingwall', raw: it}));
+      this.questMarks.forEach(it => items.push({searchType: 'quest', name: it.name, icon: it.image + '.png', typeLabel: 'Quest', raw: it}));
+      this.customMarks.forEach(it => items.push({searchType: 'marker', name: it.name, icon: 'gfx/terobjs/mm/custom_pin_' + it.color + '.png', typeLabel: 'Marker', raw: it}));
+      this.players.forEach(it => items.push({searchType: 'player', name: it.name, icon: null, typeLabel: 'Player', raw: it}));
+      return items;
+    }
+  },
+  methods: {
+    // Shared "home in" logic for Thingwalls, Quest Givers, and Custom
+    // Markers -- identical body previously duplicated across three watchers.
+    jumpToMapMarker(value) {
+      let markerMapId = value.map;
+      this.maps.forEach((map) => {
+        if (markerMapId === map.ID) {
+          if (this.mapid !== map.ID)
+            this.changeMap(map.ID);
+          if (!value.marker) value.add(this);
+          this.map.setView(value.marker.getLatLng(), HnHMaxZoom);
+          this.trackingCharacterId = -1;
+        }
+      });
+    },
+    // Shared "home in" logic for players -- also called directly by
+    // jumpToSearchResult (not just the trackingCharacterId watcher) so
+    // re-selecting the same player in the search bar always re-centers,
+    // even when trackingCharacterId's value doesn't actually change.
+    jumpToCharacter(id) {
+      let character = this.characters.byId(id);
+      if (!character) return;
+      this.changeMap(character.map);
+      let latlng = this.map.unproject([character.position.x, character.position.y], HnHMaxZoom);
+      this.map.setView(latlng, HnHMaxZoom);
+      this.$router.push({path: `/character/${id}`});
+      this.autoMode = true;
+    },
+    // Fires on every search-bar selection via @change (not a v-model
+    // watcher), so re-picking the same single result always re-homes
+    // instead of silently no-oping when Vue sees no value change.
+    jumpToSearchResult(item) {
+      if (!item) return;
+      if (item.searchType === 'player') {
+        this.trackingCharacterId = item.raw.id;
+        this.jumpToCharacter(item.raw.id);
+      } else {
+        this.jumpToMapMarker(item.raw);
+      }
+      this.$nextTick(() => {
+        this.searchSelection = null;
+      });
+    },
+    toggleResourceType(cat) {
+      let idx = this.selectedResourceTypes.indexOf(cat);
+      if (idx === -1) {
+        this.selectedResourceTypes.push(cat);
+      } else {
+        this.selectedResourceTypes.splice(idx, 1);
+      }
+    },
+    toggleUnknownType(cat) {
+      let idx = this.selectedUnknownTypes.indexOf(cat);
+      if (idx === -1) {
+        this.selectedUnknownTypes.push(cat);
+      } else {
+        this.selectedUnknownTypes.splice(idx, 1);
+      }
+    },
+    toggleClutterType(cat) {
+      let idx = this.selectedClutterTypes.indexOf(cat);
+      if (idx === -1) {
+        this.selectedClutterTypes.push(cat);
+      } else {
+        this.selectedClutterTypes.splice(idx, 1);
+      }
+    },
+    // Extracted from the old overlayMap watcher body (unchanged internals)
+    // so both picking an overlay map and toggling its visibility eye run
+    // the exact same refresh -- turning visibility off temporarily hides
+    // the overlay layer/markers (overlayLayer.map = -1) without clearing
+    // the dropdown selection, and turning it back on restores from
+    // whatever's currently selected.
+    applyOverlayMap() {
+      let value = (this.showOverlayMap && this.overlayMap) ? this.overlayMap : null;
       console.log("overlayMap");
       if (value) {
         this.overlayLayer.map = value.ID;
         this.overlayLayer.redraw();
         if (this.showMarkers) {
           this.otherMarks.forEach(it => it.remove(this));
-          this.otherMarks.filter(it => it.map === this.mapid || it.map === this.overlayLayer.map).forEach(it => it.add(this));
+          this.otherMarks.filter(it => (it.map === this.mapid || it.map === this.overlayLayer.map) && this.selectedResourceTypes.includes(it.type)).forEach(it => it.add(this));
+        }
+        if (this.showUnknownMarkers) {
+          this.otherMarksAdmin.forEach(it => it.remove(this));
+          this.otherMarksAdmin.filter(it => (it.map === this.mapid || it.map === this.overlayLayer.map) && this.selectedUnknownTypes.includes(it.type)).forEach(it => it.add(this));
         }
         if (this.showThingwalls) {
           this.thingMarks.forEach(it => it.remove(this));
           this.thingMarks.filter(it => it.map === this.mapid || it.map === this.overlayLayer.map).forEach(it => {
             it.add(this);
-            it.tooltip(true);
+            it.tooltip(this.showThingwallNames);
           });
+        }
+        if (this.showVortexes) {
+          this.vortexMarks.forEach(it => it.remove(this));
+          this.vortexMarks.filter(it => it.map === this.mapid || it.map === this.overlayLayer.map).forEach(it => it.add(this));
+        }
+        if (this.showMineholes) {
+          this.mineholeMarks.forEach(it => it.remove(this));
+          this.mineholeMarks.filter(it => it.map === this.mapid || it.map === this.overlayLayer.map).forEach(it => it.add(this));
+        }
+        if (this.showCaves) {
+          this.caveMarks.forEach(it => it.remove(this));
+          this.caveMarks.filter(it => it.map === this.mapid || it.map === this.overlayLayer.map).forEach(it => it.add(this));
         }
         if (this.showQuests) {
           this.questMarks.forEach(it => it.remove(this));
           this.questMarks.filter(it => it.map === this.mapid || it.map === this.overlayLayer.map).forEach(it => {
             it.add(this);
-            it.tooltip(true);
+            it.tooltip(this.showQuestNames);
           });
         }
         if (this.showClutter) {
           this.clutterMarks.forEach(it => it.remove(this));
-          this.clutterMarks.filter(it => it.map === this.mapid || it.map === this.overlayLayer.map).forEach(it => it.add(this));
+          this.clutterMarks.filter(it => (it.map === this.mapid || it.map === this.overlayLayer.map) && this.selectedClutterTypes.includes(it.type)).forEach(it => it.add(this));
         }
         if (this.showPlayers) {
           this.characters.getElements().forEach(it => it.remove(this));
@@ -585,25 +1024,41 @@ export default {
         this.overlayLayer.redraw();
         if (this.showMarkers) {
           this.otherMarks.forEach(it => it.remove(this));
-          this.otherMarks.filter(it => it.map === this.mapid).forEach(it => it.add(this));
+          this.otherMarks.filter(it => it.map === this.mapid && this.selectedResourceTypes.includes(it.type)).forEach(it => it.add(this));
+        }
+        if (this.showUnknownMarkers) {
+          this.otherMarksAdmin.forEach(it => it.remove(this));
+          this.otherMarksAdmin.filter(it => it.map === this.mapid && this.selectedUnknownTypes.includes(it.type)).forEach(it => it.add(this));
         }
         if (this.showThingwalls) {
           this.thingMarks.forEach(it => it.remove(this));
           this.thingMarks.filter(it => it.map === this.mapid).forEach(it => {
             it.add(this);
-            it.tooltip(true);
+            it.tooltip(this.showThingwallNames);
           });
+        }
+        if (this.showVortexes) {
+          this.vortexMarks.forEach(it => it.remove(this));
+          this.vortexMarks.filter(it => it.map === this.mapid).forEach(it => it.add(this));
+        }
+        if (this.showMineholes) {
+          this.mineholeMarks.forEach(it => it.remove(this));
+          this.mineholeMarks.filter(it => it.map === this.mapid).forEach(it => it.add(this));
+        }
+        if (this.showCaves) {
+          this.caveMarks.forEach(it => it.remove(this));
+          this.caveMarks.filter(it => it.map === this.mapid).forEach(it => it.add(this));
         }
         if (this.showQuests) {
           this.questMarks.forEach(it => it.remove(this));
           this.questMarks.filter(it => it.map === this.mapid).forEach(it => {
             it.add(this);
-            it.tooltip(this.showPlayerTooltips);
+            it.tooltip(this.showQuestNames);
           });
         }
         if (this.showClutter) {
           this.clutterMarks.forEach(it => it.remove(this));
-          this.clutterMarks.filter(it => it.map === this.mapid).forEach(it => it.add(this));
+          this.clutterMarks.filter(it => it.map === this.mapid && this.selectedClutterTypes.includes(it.type)).forEach(it => it.add(this));
         }
         if (this.showPlayers) {
           this.characters.getElements().forEach(it => it.remove(this));
@@ -622,80 +1077,6 @@ export default {
         }
       }
     },
-    selectedQuest(value) {
-      //selectedMap
-      console.log('selectedQuest', value);
-      if (value) {
-        let markerMapId = value.map;
-
-        this.maps.forEach((map) => {
-          if (markerMapId === map.ID) {
-            if (this.mapid !== map.ID)
-              this.changeMap(map.ID);
-
-            if (!value.marker) value.add(this);
-            this.map.setView(value.marker.getLatLng(), HnHMaxZoom);
-            this.trackingCharacterId = -1;
-            return;
-          }
-        })
-      }
-    },
-    selectedThing(value) {
-      //selectedMap
-      console.log('selectedThing', value);
-      if (value) {
-        let markerMapId = value.map;
-
-        this.maps.forEach((map) => {
-          if (markerMapId === map.ID) {
-            if (this.mapid !== map.ID)
-              this.changeMap(map.ID);
-
-            if (!value.marker) value.add(this);
-            this.map.setView(value.marker.getLatLng(), HnHMaxZoom);
-            this.trackingCharacterId = -1;
-            return;
-          }
-        })
-      }
-    },
-    selectedCustomMarker(value) {
-      console.log('selectedCustomMarker', value);
-      if (value) {
-        let markerMapId = value.map;
-
-        this.maps.forEach((map) => {
-          if (markerMapId === map.ID) {
-            if (this.mapid !== map.ID)
-              this.changeMap(map.ID);
-
-            if (!value.marker) value.add(this);
-            this.map.setView(value.marker.getLatLng(), HnHMaxZoom);
-            this.trackingCharacterId = -1;
-            return;
-          }
-        })
-      }
-    },
-    selectedPlayer(value) {
-      if (value && value.id) {
-        this.trackingCharacterId = value.id;
-      }
-    }
-  },
-  mounted() {
-    let chars = this.$http.get(`${API_ENDPOINT}/v1/characters`)
-    let maps = this.$http.get(`${API_ENDPOINT}/maps`)
-
-    Promise.all([chars, maps]).then(values => {
-      this.setupMap(values[0].body, values[1].body);
-    }, () => this.$emit("error"));
-  },
-  beforeDestroy: function () {
-    clearInterval(this.intervalId)
-  },
-  methods: {
     setupMap(characters, maps) {
       this.$http.get(`${API_ENDPOINT}/config`).then(response => {
         this.processConfig(response.body);
@@ -745,6 +1126,12 @@ export default {
           this.$router.replace({path: `/grid/${this.mapid}/${coordinate.x}/${coordinate.y}/${coordinate.z}`}).catch(() => {});
           this.trackingCharacterId = -1;
         }
+        // Thingwall icons scale with zoom (see Marker.js buildIcon) --
+        // re-apply on every zoom change so they actually shrink/grow
+        // live instead of only sizing correctly at the zoom level they
+        // happened to be added at. Scoped to Thingwalls only, matching
+        // the ask -- other marker types keep their static sizing.
+        this.thingMarks.forEach(it => it.rescale(this));
       });
 
       this.layer = new SmartTileLayer('grids/{map}/{z}/{x}_{y}.png?{cache}', {
@@ -934,18 +1321,22 @@ export default {
       this.markers.update(markersData.map(it => {
             let m = new Marker(it);
             if (m.type === "thingwall")
-              m.tstate = true;
+              m.tstate = this.showThingwallNames;
             else if (m.type === "quest")
-              m.tstate = true;
+              m.tstate = this.showQuestNames;
             else
               m.tstate = false;
             return m;
           }),
           (marker) => { // Add
             let visible = marker.type === "thingwall" ? this.showThingwalls
+                : marker.type === "watervortex" ? this.showVortexes
+                : marker.type === "Mineshaft" ? this.showMineholes
+                : marker.type === "Cave" ? this.showCaves
                 : marker.type === "quest" ? this.showQuests
-                : CLUTTER_TYPES.includes(marker.type) ? this.showClutter
-                : this.showMarkers;
+                : CLUTTER_TYPES.includes(marker.type) ? this.showClutter && this.selectedClutterTypes.includes(marker.type)
+                : KNOWN_RESOURCE_TYPES.includes(marker.type.toLowerCase()) ? this.showMarkers && this.selectedResourceTypes.includes(marker.type)
+                : this.showUnknownMarkers && this.selectedUnknownTypes.includes(marker.type);
             if (visible && (marker.map === this.mapid || marker.map === this.overlayLayer.map)) {
               marker.add(this);
             }
@@ -979,25 +1370,55 @@ export default {
 
       this.allMarks.length = 0;
       this.otherMarks.length = 0;
+      this.otherMarksAdmin.length = 0;
       this.thingMarks.length = 0;
+      this.vortexMarks.length = 0;
+      this.mineholeMarks.length = 0;
+      this.caveMarks.length = 0;
       this.questMarks.length = 0;
       this.clutterMarks.length = 0;
+      this.clutterCategories.length = 0;
       this.markers.getElements().filter(it => it.name != null && it.name.length > 0 && !it.hidden).sort((a, b) => {
         let im = a.image.localeCompare(b.image);
         return im === 0 ? a.name.localeCompare(b.name) : im;
       }).forEach(it => {
+        // gfx/terobjs/mm/custom covers two very different things: the
+        // dedicated admin-placed Custom Markers feature (its own separate
+        // system entirely, not touched here) and this Mapper's own
+        // auto-generated "entrance marker" / last-known-position markers
+        // dropped whenever a new map layer is discovered. The latter are
+        // meta/navigational, not real game content, so they're excluded
+        // from every visible bucket entirely rather than folded into
+        // Clutter (which should stay actual game-world resources) or the
+        // resource panel.
+        if (it.image === "gfx/terobjs/mm/custom") {
+          return;
+        }
         this.allMarks.push(it);
         if (it.type === "thingwall")
           this.thingMarks.push(it);
+        else if (it.type === "watervortex")
+          this.vortexMarks.push(it);
+        else if (it.type === "Mineshaft")
+          this.mineholeMarks.push(it);
+        else if (it.type === "Cave")
+          this.caveMarks.push(it);
         else if (it.type === "quest")
           this.questMarks.push(it);
-        else if (CLUTTER_TYPES.includes(it.type))
+        else if (CLUTTER_TYPES.includes(it.type)) {
           this.clutterMarks.push(it);
-        else
+          if (!this.clutterCategories.includes(it.type))
+            this.clutterCategories.push(it.type);
+        }
+        else if (KNOWN_RESOURCE_TYPES.includes(it.type.toLowerCase())) {
           this.otherMarks.push(it);
-
-        if (!this.marksCategories.includes(it.type))
-          this.marksCategories.push(it.type);
+          if (!this.marksCategories.includes(it.type))
+            this.marksCategories.push(it.type);
+        } else {
+          this.otherMarksAdmin.push(it);
+          if (!this.unknownCategories.includes(it.type))
+            this.unknownCategories.push(it.type);
+        }
       });
     },
     showThingwallConnections(marker) {
@@ -1136,7 +1557,9 @@ export default {
             return ch;
           }),
           (character) => { // Add
-            character.add(this);
+            if (this.showPlayers) {
+              character.add(this);
+            }
             character.setClickCallback(() => { // Zoom to character on marker click
               this.trackingCharacterId = character.id;
             });
@@ -1152,7 +1575,7 @@ export default {
               let latlng = this.map.unproject([updated.position.x, updated.position.y], HnHMaxZoom);
               this.map.setView(latlng, this.map.getZoom());
             }
-            character.update(this, updated);
+            character.update(this, updated, this.showPlayers);
           }
       );
       this.players.length = 0;
@@ -1162,6 +1585,35 @@ export default {
       document.title = config.title;
       this.auths = config.auths;
       this.username = config.username;
+      this.isPublic = !!config.public;
+      // Personal preferences from the account's own /settings page --
+      // omitted by the server for an account that's never visited it, so
+      // keep this component's own default (true) in that case instead of
+      // falling back to JS's undefined-is-falsy.
+      if (config.showPlayerNames !== undefined) this.showPlayerTooltips = config.showPlayerNames;
+      if (config.hideCharacterNames !== undefined) this.hideCharacterNames = config.hideCharacterNames;
+      if (config.thingwallScale !== undefined) this.thingwallScale = config.thingwallScale;
+      // A section this account isn't granted (see canSeeSection/v-if in
+      // the template) isn't just hidden from the settings drawer -- its
+      // underlying data is forced off too, so it can't show just because
+      // a toggle happened to default to "on".
+      if (!this.canSeeSection('naturalMarkers')) this.showMarkers = false;
+      if (!this.canSeeSection('naturalMarkers')) this.showMineholes = false;
+      if (!this.canSeeSection('naturalMarkers')) this.showCaves = false;
+      if (!this.canSeeSection('other')) this.showUnknownMarkers = false;
+      if (!this.canSeeSection('thingwalls')) this.showThingwalls = false;
+      if (!this.canSeeSection('vortexes')) this.showVortexes = false;
+      if (!this.canSeeSection('questGivers')) this.showQuests = false;
+      if (!this.auths.includes('point')) this.showPlayers = false;
+      if (!this.canSeeSection('roads')) this.showRoads = false;
+      if (!this.canSeeSection('customMarkers')) this.showCustomMarkers = false;
+      if (!this.canSeeSection('clutter')) this.showClutter = false;
+    },
+    // Each Markers section is granted per-account as an ordinary auth
+    // string "sec_<key>" (see SectionOptions in admin.go / the Markers
+    // checkbox group in user.tmpl) -- same mechanism as Map/Writer/Admin.
+    canSeeSection(key) {
+      return this.auths.includes('sec_' + key);
     },
     toLatLng(x, y) {
       return this.map.unproject([x, y], HnHMaxZoom);
@@ -1242,7 +1694,14 @@ export default {
         this.overlayLayer.redraw();
         if (this.showMarkers) {
           this.otherMarks.forEach(it => it.remove(this));
-          this.otherMarks.filter(it => it.map === this.mapid).forEach(it => {
+          this.otherMarks.filter(it => it.map === this.mapid && this.selectedResourceTypes.includes(it.type)).forEach(it => {
+            it.add(this);
+            it.tooltip(false);
+          });
+        }
+        if (this.showUnknownMarkers) {
+          this.otherMarksAdmin.forEach(it => it.remove(this));
+          this.otherMarksAdmin.filter(it => it.map === this.mapid && this.selectedUnknownTypes.includes(it.type)).forEach(it => {
             it.add(this);
             it.tooltip(false);
           });
@@ -1251,19 +1710,31 @@ export default {
           this.thingMarks.forEach(it => it.remove(this));
           this.thingMarks.filter(it => it.map === this.mapid).forEach(it => {
             it.add(this);
-            it.tooltip(true);
+            it.tooltip(this.showThingwallNames);
           });
+        }
+        if (this.showVortexes) {
+          this.vortexMarks.forEach(it => it.remove(this));
+          this.vortexMarks.filter(it => it.map === this.mapid).forEach(it => it.add(this));
+        }
+        if (this.showMineholes) {
+          this.mineholeMarks.forEach(it => it.remove(this));
+          this.mineholeMarks.filter(it => it.map === this.mapid).forEach(it => it.add(this));
+        }
+        if (this.showCaves) {
+          this.caveMarks.forEach(it => it.remove(this));
+          this.caveMarks.filter(it => it.map === this.mapid).forEach(it => it.add(this));
         }
         if (this.showQuests) {
           this.questMarks.forEach(it => it.remove(this));
           this.questMarks.filter(it => it.map === this.mapid).forEach(it => {
             it.add(this);
-            it.tooltip(true);
+            it.tooltip(this.showQuestNames);
           });
         }
         if (this.showClutter) {
           this.clutterMarks.forEach(it => it.remove(this));
-          this.clutterMarks.filter(it => it.map === this.mapid).forEach(it => it.add(this));
+          this.clutterMarks.filter(it => it.map === this.mapid && this.selectedClutterTypes.includes(it.type)).forEach(it => it.add(this));
         }
         if (this.showPlayers) {
           this.characters.getElements().forEach(it => it.remove(this));
@@ -1416,13 +1887,6 @@ export default {
   text-transform: none !important;
 }
 
-.draw-road-btn {
-  height: 56px !important;
-  font-size: 1.1rem !important;
-  font-weight: 700 !important;
-  text-transform: none !important;
-}
-
 .v-list {
   padding: 5px !important;
   height: auto !important;
@@ -1435,6 +1899,22 @@ export default {
 
 .v-navigation-drawer {
   width: auto !important;
+  /* Vuetify's automatic app-bar/drawer offset coordination isn't kicking
+     in here (drawer was rendering at top:0, directly under the 56px
+     dense app-bar instead of below it) -- pin it explicitly rather than
+     keep fighting whatever's suppressing the automatic calculation. */
+  top: 56px !important;
+}
+
+.v-app-bar {
+  /* By default Vuetify shrinks the app-bar to make room for the drawer
+     beside it (matching :mini-variant-width, 36px collapsed). The design
+     wants the bar spanning the full width edge-to-edge instead, with the
+     drawer sitting entirely below it -- overriding the horizontal
+     coordination while leaving the vertical (drawer top:56px above)
+     alone. */
+  left: 0 !important;
+  width: 100% !important;
 }
 
 .v-text-field__details {
@@ -1448,6 +1928,34 @@ export default {
 
 .v-list-item__content {
   padding: 0px !important;
+}
+
+.row-icons {
+  /* Fixed-width gutter for each drawer row's icon-toggle(s) -- rows with
+     one icon (Grid Coordinates) and rows with two (Thingwalls, Quest
+     Givers, Players) previously pushed their label to different X
+     offsets since the icons sat directly inline before it. Reserving the
+     same width regardless of how many icons a row actually has keeps
+     every label starting at the same position. Sized for the widest
+     case (two icons: ~24px + 8px margin each). */
+  display: flex;
+  align-items: center;
+  width: 64px;
+  flex-shrink: 0;
+}
+
+.row-marker-icons {
+  /* Trailing, right-aligned counterpart to .row-icons -- shows the
+     actual in-game marker image(s) for a row (Thingwalls, Vortexes,
+     Mineholes & Caves), aligned among themselves via a shared fixed
+     width, same reasoning as .row-icons but for decorative reference
+     images instead of functional toggles. Sized for the widest case
+     (Mineholes & Caves: two images side by side). */
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  width: 48px;
+  flex-shrink: 0;
 }
 
 .v-input__slot {

@@ -13,10 +13,22 @@ type Config struct {
 	Title    string   `json:"title"`
 	Auths    []string `json:"auths"`
 	Username string   `json:"username"`
+	// Public is true when this request has no real session and is running
+	// on the PublicConfig fallback auths (see getSessionOrPublic) -- the
+	// frontend uses this to show a "Login" link instead of a username.
+	Public bool `json:"public"`
+	// ShowPlayerNames/HideCharacterNames are personal preferences from the
+	// account's own User record (see settings.go) -- omitted entirely for
+	// an account that's never visited /settings, or for a Public session
+	// (no account to read), so the frontend keeps its own default instead
+	// of every account silently starting from Go's zero value.
+	ShowPlayerNames    *bool    `json:"showPlayerNames,omitempty"`
+	HideCharacterNames *bool    `json:"hideCharacterNames,omitempty"`
+	ThingwallScale     *float64 `json:"thingwallScale,omitempty"`
 }
 
 func (m *Map) getChars(rw http.ResponseWriter, req *http.Request) {
-	s := m.getSession(req)
+	s := m.getSessionOrPublic(req)
 	if s == nil || !s.Auths.Has(AUTH_MAP) {
 		rw.WriteHeader(http.StatusUnauthorized)
 		return
@@ -69,7 +81,7 @@ func (m *Map) sendPing(rw http.ResponseWriter, req *http.Request) {
 }
 
 func (m *Map) getPingSound(rw http.ResponseWriter, req *http.Request) {
-	s := m.getSession(req)
+	s := m.getSessionOrPublic(req)
 	if s == nil || !s.Auths.Has(AUTH_MAP) {
 		rw.WriteHeader(http.StatusUnauthorized)
 		return
@@ -92,7 +104,7 @@ func (m *Map) getPingSound(rw http.ResponseWriter, req *http.Request) {
 }
 
 func (m *Map) getMarkers(rw http.ResponseWriter, req *http.Request) {
-	s := m.getSession(req)
+	s := m.getSessionOrPublic(req)
 	if s == nil || !s.Auths.Has(AUTH_MAP) {
 		rw.WriteHeader(http.StatusUnauthorized)
 		return
@@ -146,7 +158,7 @@ func (m *Map) getMarkers(rw http.ResponseWriter, req *http.Request) {
 }
 
 func (m *Map) getMaps(rw http.ResponseWriter, req *http.Request) {
-	s := m.getSession(req)
+	s := m.getSessionOrPublic(req)
 	if s == nil || !s.Auths.Has(AUTH_MAP) {
 		rw.WriteHeader(http.StatusUnauthorized)
 		return
@@ -167,6 +179,9 @@ func (m *Map) getMaps(rw http.ResponseWriter, req *http.Request) {
 			if mi.Hidden {
 				return nil
 			}
+			if mi.RequiredAuth != "" && !s.Auths.Has(mi.RequiredAuth) {
+				return nil
+			}
 			maps[mapid] = mi
 			return nil
 		})
@@ -175,7 +190,7 @@ func (m *Map) getMaps(rw http.ResponseWriter, req *http.Request) {
 }
 
 func (m *Map) config(rw http.ResponseWriter, req *http.Request) {
-	s := m.getSession(req)
+	s := m.getSessionOrPublic(req)
 	if s == nil || !s.Auths.Has(AUTH_MAP) {
 		rw.WriteHeader(http.StatusUnauthorized)
 		return
@@ -183,14 +198,26 @@ func (m *Map) config(rw http.ResponseWriter, req *http.Request) {
 	config := Config{
 		Auths:    s.Auths,
 		Username: s.Username,
+		Public:   s.Username == "",
 	}
 	m.db.View(func(tx *bbolt.Tx) error {
 		b := tx.Bucket([]byte("config"))
-		if b == nil {
-			return nil
+		if b != nil {
+			title := b.Get([]byte("title"))
+			config.Title = string(title)
 		}
-		title := b.Get([]byte("title"))
-		config.Title = string(title)
+		if s.Username != "" {
+			if users := tx.Bucket([]byte("users")); users != nil {
+				if raw := users.Get([]byte(s.Username)); raw != nil {
+					u := User{}
+					if json.Unmarshal(raw, &u) == nil {
+						config.ShowPlayerNames = u.ShowPlayerNames
+						config.HideCharacterNames = u.HideCharacterNames
+						config.ThingwallScale = u.ThingwallScale
+					}
+				}
+			}
+		}
 		return nil
 	})
 	json.NewEncoder(rw).Encode(config)

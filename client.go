@@ -86,6 +86,12 @@ func (m *Map) client(rw http.ResponseWriter, req *http.Request) {
 		m.updatePositions(rw, req, u)
 	case "markerUpdate":
 		m.uploadMarkers(rw, req)
+	case "gridCacheUpdate":
+		m.gridCacheUpdate(rw, req)
+	case "gridCacheUpload":
+		m.gridUpload(rw, req)
+	case "gridCacheOverlayUpload":
+		m.gridCacheOverlayUpload(rw, req)
 	/*case "mapData":
 	m.mapdataIndex(rw, req)*/
 	case "":
@@ -129,6 +135,7 @@ func (m *Map) updatePositions(rw http.ResponseWriter, req *http.Request, u User)
 	// 		id, craw.Name, craw.GridID, craw.Coords.X, craw.Coords.Y, craw.Type)
 	// }
 	groups := groupArr(u.Auths)
+	username, _ := req.Context().Value(UserInfo).(string)
 	m.db.View(func(tx *bbolt.Tx) error {
 		grids := tx.Bucket([]byte("grids"))
 		if grids == nil {
@@ -155,6 +162,15 @@ func (m *Map) updatePositions(rw http.ResponseWriter, req *http.Request, u User)
 				Type:    craw.Type,
 				updated: time.Now(),
 				group:   groups,
+			}
+			if c.Type == "player" && username != "" {
+				m.lastPos[username] = LastPosition{
+					Map:     gd.Map,
+					GridID:  craw.GridID,
+					X:       craw.Coords.X,
+					Y:       craw.Coords.Y,
+					Updated: time.Now(),
+				}
 			}
 			old, ok := m.characters[id]
 			if !ok {
@@ -184,6 +200,31 @@ func (m *Map) updatePositions(rw http.ResponseWriter, req *http.Request, u User)
 		return nil
 	})
 
+}
+
+// Display names from Kami's own automark.json5, mapped to the same
+// universal gob resource names Nurgling's mm/down->gfx/terobjs/minehole
+// translation (Requestor.java) already uses, so both clients' data
+// resolves to the same icon on the frontend. Covers every entry in
+// Kami's automark.json5, not just minehole/ladder -- all verified live
+// (HTTP 200) against the game's resource server.
+var kamiAutoMarkNames = map[string]string{
+	// minehole/ladder have no gfx/terobjs/mm/* minimap-icon resource at
+	// all (verified 404) -- that's why both Nurgling and Kami built their
+	// own custom local icon overrides for these two specifically. The raw
+	// gob resource is the only universal option here.
+	"Minehole": "gfx/terobjs/minehole",
+	"Ladder":   "gfx/terobjs/ladder",
+	// These do have real gfx/terobjs/mm/* minimap icons, and Nurgling's
+	// own uploads already use that exact convention (confirmed live:
+	// gfx/terobjs/mm/tarpit, /amberwash, /flintwash already present in
+	// production data) -- match it instead of the raw gob resource so
+	// both clients' data lands under the same name.
+	"Tarpit":     "gfx/terobjs/mm/tarpit",
+	"Amber Wash": "gfx/terobjs/mm/amberwash",
+	"Flint Wash": "gfx/terobjs/mm/flintwash",
+	"Cave":       "gfx/tiles/ridges/cavein",
+	"Exit":       "gfx/tiles/ridges/caveout",
 }
 
 func (m *Map) uploadMarkers(rw http.ResponseWriter, req *http.Request) {
@@ -235,7 +276,18 @@ func (m *Map) uploadMarkers(rw http.ResponseWriter, req *http.Request) {
 				continue
 			}
 			if mraw.Image == "" {
-				mraw.Image = "gfx/terobjs/mm/custom"
+				// Kami's own auto-marker upload (integrations.mapv4.MappingClient's
+				// ProcessMapper) never sets "image"/"type" for its CustomMarker
+				// class -- only for SMarker/PMarker. The marker's name still comes
+				// through, though, and for auto-marked types it's always the exact
+				// display name from Kami's automark.json5, so we can recover the
+				// correct universal image from that instead of falling back to a
+				// generic custom marker.
+				if img, ok := kamiAutoMarkNames[mraw.Name]; ok {
+					mraw.Image = img
+				} else {
+					mraw.Image = "gfx/terobjs/mm/custom"
+				}
 			}
 			id, err := idB.NextSequence()
 			if err != nil {
@@ -367,14 +419,68 @@ func (m *Map) gridUpdate(rw http.ResponseWriter, req *http.Request) {
 				return err
 			}
 			log.Println("Client made mapid ", seq)
+
+			// Best-effort: if this user had a recently-tracked player position on a
+			// different map, assume that's where they entered this new one from (e.g.
+			// a cave/dungeon mouth) and drop a marker there labeled with the new map's
+			// name, so the entrance point is visible on the map they came from.
+			//
+			// Also seed the new map's coordinate origin from that same entry point,
+			// so the first cell registered here carries the same grid coordinate the
+			// player was standing on just before the transition, instead of always
+			// starting a new map at a bare {0, 0}.
+			origin := Coord{0, 0}
+			username, _ := req.Context().Value(UserInfo).(string)
+			if username != "" {
+				m.chmu.RLock()
+				lp, ok := m.lastPos[username]
+				m.chmu.RUnlock()
+				if ok && lp.Map != int(seq) && time.Since(lp.Updated) < 30*time.Second {
+					if oldGridRaw := grids.Get([]byte(lp.GridID)); oldGridRaw != nil {
+						oldGrid := GridData{}
+						json.Unmarshal(oldGridRaw, &oldGrid)
+						origin = oldGrid.Coord
+					}
+					mb, err := tx.CreateBucketIfNotExists([]byte("markers"))
+					if err == nil {
+						grid, err := mb.CreateBucketIfNotExists([]byte("grid"))
+						if err == nil {
+							idB, err := mb.CreateBucketIfNotExists([]byte("id"))
+							if err == nil {
+								key := []byte(fmt.Sprintf("%s_%d_%d", lp.GridID, lp.X, lp.Y))
+								if grid.Get(key) == nil {
+									mid, err := idB.NextSequence()
+									if err == nil {
+										entrance := Marker{
+											Name:   mi.Name,
+											ID:     int(mid),
+											GridID: lp.GridID,
+											Position: Position{
+												X: lp.X,
+												Y: lp.Y,
+											},
+											Image: "gfx/terobjs/mm/custom",
+										}
+										raw, _ := json.Marshal(entrance)
+										grid.Put(key, raw)
+										idB.Put([]byte(strconv.Itoa(int(mid))), key)
+										log.Println("Marked entrance to mapid ", seq, " on map ", lp.Map)
+									}
+								}
+							}
+						}
+					}
+				}
+			}
+
 			for x, row := range grup.Grids {
 				for y, grid := range row {
 
 					cur := GridData{}
 					cur.ID = grid
 					cur.Map = int(seq)
-					cur.Coord.X = x - 1
-					cur.Coord.Y = y - 1
+					cur.Coord.X = origin.X + (x - 1)
+					cur.Coord.Y = origin.Y + (y - 1)
 
 					raw, err := json.Marshal(cur)
 					if err != nil {
@@ -384,7 +490,7 @@ func (m *Map) gridUpdate(rw http.ResponseWriter, req *http.Request) {
 					greq.GridRequests = append(greq.GridRequests, grid)
 				}
 			}
-			greq.Coords = Coord{0, 0}
+			greq.Coords = origin
 			return nil
 		}
 
@@ -538,6 +644,126 @@ func (m *Map) mapdataIndex(rw http.ResponseWriter, req *http.Request) {
 
 type ExtraData struct {
 	Season int
+}
+
+type GridCacheInfo struct {
+	GridId int64 `json:"gridId"`
+	X      int   `json:"x"`
+	Y      int   `json:"y"`
+}
+
+type GridCacheUpdateReq struct {
+	Genus     string          `json:"genus"`
+	SegmentId int64           `json:"segmentId"`
+	Grids     []GridCacheInfo `json:"grids"`
+}
+
+// gridCacheUpdate handles Kami's legacy "V1" bulk map-export protocol
+// (MapFile.exportToMapper -> MappingClient.UploadCacheGrid), used by the
+// client's "Export 2 Mapper (V1)" button. Unlike gridUpdate (built around
+// live position tracking and a 3x3 grid neighborhood), this reports an
+// entire segment's grids at once with already-known relative coordinates,
+// and expects no response body back -- the client uploads every grid's
+// image unconditionally right after this call succeeds.
+func (m *Map) gridCacheUpdate(rw http.ResponseWriter, req *http.Request) {
+	defer req.Body.Close()
+	dec := json.NewDecoder(req.Body)
+	gcu := GridCacheUpdateReq{}
+	if err := dec.Decode(&gcu); err != nil {
+		log.Println("Error decoding gridCacheUpdate json: ", err)
+		http.Error(rw, "Error decoding request", http.StatusBadRequest)
+		return
+	}
+	if len(gcu.Grids) == 0 {
+		return
+	}
+
+	err := m.db.Update(func(tx *bbolt.Tx) error {
+		grids, err := tx.CreateBucketIfNotExists([]byte("grids"))
+		if err != nil {
+			return err
+		}
+		mapB, err := tx.CreateBucketIfNotExists([]byte("maps"))
+		if err != nil {
+			return err
+		}
+		configb, err := tx.CreateBucketIfNotExists([]byte("config"))
+		if err != nil {
+			return err
+		}
+
+		// Reuse an existing map if we already know any of these grids (e.g.
+		// from normal position-tracking use of the same account), computing
+		// the offset between this payload's relative coordinates and our
+		// already-stored absolute ones.
+		mapid := -1
+		offset := Coord{}
+		for _, g := range gcu.Grids {
+			idStr := strconv.FormatInt(g.GridId, 10)
+			if raw := grids.Get([]byte(idStr)); raw != nil {
+				gd := GridData{}
+				json.Unmarshal(raw, &gd)
+				mapid = gd.Map
+				offset = Coord{X: gd.Coord.X - g.X, Y: gd.Coord.Y - g.Y}
+				break
+			}
+		}
+		if mapid == -1 {
+			seq, err := mapB.NextSequence()
+			if err != nil {
+				return err
+			}
+			mi := MapInfo{
+				ID:     int(seq),
+				Name:   strconv.Itoa(int(seq)),
+				Hidden: configb.Get([]byte("defaultHide")) != nil,
+			}
+			raw, _ := json.Marshal(mi)
+			if err := mapB.Put([]byte(strconv.Itoa(int(seq))), raw); err != nil {
+				return err
+			}
+			mapid = int(seq)
+			log.Println("gridCacheUpdate made mapid ", seq)
+		}
+
+		for _, g := range gcu.Grids {
+			idStr := strconv.FormatInt(g.GridId, 10)
+			if grids.Get([]byte(idStr)) != nil {
+				continue
+			}
+			cur := GridData{
+				ID:  idStr,
+				Map: mapid,
+				Coord: Coord{
+					X: g.X + offset.X,
+					Y: g.Y + offset.Y,
+				},
+			}
+			raw, err := json.Marshal(cur)
+			if err != nil {
+				return err
+			}
+			if err := grids.Put([]byte(idStr), raw); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		log.Println("Error handling gridCacheUpdate: ", err)
+		http.Error(rw, "Error handling request", http.StatusInternalServerError)
+		return
+	}
+	rw.WriteHeader(http.StatusOK)
+}
+
+// gridCacheOverlayUpload accepts Kami's V1 overlay-image upload but doesn't
+// store it -- overlay tiles aren't rendered anywhere in this codebase, so
+// there's nothing meaningful to do with them yet. Accepting (rather than
+// 404ing) lets the client's export finish cleanly instead of logging an
+// error per grid.
+func (m *Map) gridCacheOverlayUpload(rw http.ResponseWriter, req *http.Request) {
+	rw.WriteHeader(http.StatusOK)
 }
 
 func (m *Map) gridUpload(rw http.ResponseWriter, req *http.Request) {

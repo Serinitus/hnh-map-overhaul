@@ -24,11 +24,24 @@ type Map struct {
 	characters map[string]Character
 	chmu       sync.RWMutex
 
+	// Last known position of each user's player character, kept in the same
+	// grid-local coordinate form used for marker storage (GridID + local
+	// offset) so a new-map creation event can be linked back to it without
+	// any coordinate math.
+	lastPos map[string]LastPosition
+
 	*webapp.WebApp
 
 	gridUpdates  topic
 	mergeUpdates mergeTopic
 	pingUpdates  pingTopic
+}
+
+type LastPosition struct {
+	Map     int
+	GridID  string
+	X, Y    int
+	Updated time.Time
 }
 
 type Session struct {
@@ -68,6 +81,7 @@ func main() {
 		db:          db,
 
 		characters: map[string]Character{},
+		lastPos:    map[string]LastPosition{},
 
 		WebApp: webapp.Must(webapp.New().LoadTemplates("./templates/")),
 	}
@@ -105,10 +119,12 @@ func main() {
 	http.HandleFunc("/", m.index)
 	http.HandleFunc("/generateToken", m.generateToken)
 	http.HandleFunc("/password", m.changePassword)
+	http.HandleFunc("/settings", m.settings)
 
 	// Admin endpoints
 	http.HandleFunc("/admin/", m.admin)
 	http.HandleFunc("/admin/user", m.adminUser)
+	http.HandleFunc("/admin/public", m.adminPublic)
 	http.HandleFunc("/admin/deleteUser", m.deleteUser)
 	http.HandleFunc("/admin/wipe", m.wipe)
 	http.HandleFunc("/admin/setPrefix", m.setPrefix)
@@ -183,6 +199,11 @@ type MapInfo struct {
 	Name     string
 	Hidden   bool
 	Priority bool
+	// RequiredAuth, when non-empty, is an Auths entry (e.g. "g1", "writer")
+	// a user must have for this map to appear in their map list. Empty
+	// means visible to anyone with the base "map" auth, same as before
+	// this field existed.
+	RequiredAuth string
 }
 
 type GridData struct {
@@ -250,6 +271,18 @@ type User struct {
 	Pass   []byte
 	Auths  Auths
 	Tokens []string
+	// ShowPlayerNames/HideCharacterNames are personal display preferences,
+	// set on the /settings page (see settings.go) -- pointers so an unset
+	// preference (nil) can be told apart from an explicit false, letting
+	// the frontend fall back to its own default for every account that
+	// hasn't visited that page yet, rather than silently flipping to
+	// Go's zero value.
+	ShowPlayerNames    *bool
+	HideCharacterNames *bool
+	// ThingwallScale is a personal multiplier (1 = unmodified live default)
+	// on top of Thingwall icons' zoom-based scaling -- see buildIcon in
+	// Marker.js. Same nil-means-unset convention as the two above.
+	ThingwallScale *float64
 }
 
 func (m *Map) getSession(req *http.Request) *Session {
@@ -294,6 +327,49 @@ func (m *Map) getSession(req *http.Request) *Session {
 		return nil
 	})
 	return s
+}
+
+// PublicConfig is the admin-editable "Public" settings section (see
+// adminPublic in admin.go) -- a single, always-present config record, not
+// a row in the users bucket. Enabled is a standalone kill switch: even
+// with Auths populated, anonymous access stays off until this is true.
+type PublicConfig struct {
+	Enabled bool
+	Auths   Auths
+}
+
+func (m *Map) getPublicConfig() PublicConfig {
+	cfg := PublicConfig{}
+	m.db.View(func(tx *bbolt.Tx) error {
+		b := tx.Bucket([]byte("config"))
+		if b == nil {
+			return nil
+		}
+		if raw := b.Get([]byte("public")); raw != nil {
+			json.Unmarshal(raw, &cfg)
+		}
+		return nil
+	})
+	return cfg
+}
+
+// getSessionOrPublic behaves like getSession, but falls back to the
+// PublicConfig auths (see getPublicConfig) when there's no real session,
+// instead of returning nil -- only if Public access is Enabled. The
+// returned Session has an empty Username, which is how callers (see
+// Config.Public in map.go) tell a real session from an anonymous one. Use
+// this only in read-only, map-viewing endpoints -- anonymous access should
+// never reach write/admin handlers, which must keep using getSession
+// directly.
+func (m *Map) getSessionOrPublic(req *http.Request) *Session {
+	if s := m.getSession(req); s != nil {
+		return s
+	}
+	cfg := m.getPublicConfig()
+	if !cfg.Enabled {
+		return nil
+	}
+	return &Session{Auths: cfg.Auths}
 }
 
 func (m *Map) deleteSession(s *Session) {

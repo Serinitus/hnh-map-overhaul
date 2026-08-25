@@ -14,15 +14,23 @@
 		{{template "navbar.tmpl" .}}
 		<div class="container">
             <form method="POST">
-                <div class="row">
-                    <div class="input-field col s6">
-                        <input id="username" type="text" class="validate" name="user"{{if ne .Username ""}} value="{{.Username}}" disabled{{end}}>
-                        <label for="username">Username</label>
-                    </div>
-                    <div class="input-field col s6">
-                        <input id="password" type="password" class="validate" name="pass">
-                        <label for="password">Password</label>
-                    </div>
+                <div class="col s12">
+                    <ul class="collection with-header">
+                        <li class="collection-header">
+                            <h6>Public Access</h6>
+                            <p>When enabled, anyone with no logged-in account gets this set
+                                of permissions -- the home page becomes the map instead of
+                                the login screen, and the account menu shows "Login" instead
+                                of a username. Leave disabled to keep this instance
+                                login-only, regardless of what's checked below.</p>
+                        </li>
+                        <li class="collection-item">
+                            <label>
+                                <input type="checkbox" name="enabled" value="true"{{if .Config.Enabled}} checked="checked"{{end}}/>
+                                <span>Enable Public Access</span>
+                            </label>
+                        </li>
+                    </ul>
                 </div>
                 <div class="col s12">
                     <ul class="collection with-header">
@@ -31,67 +39,67 @@
                         </li>
                         <li class="collection-item">
                             <label>
-                                <input type="checkbox" name="auths" value="map"{{if .User.Auths.Has "map"}} checked="checked"{{end}}/>
+                                <input type="checkbox" name="auths" value="map"{{if .Config.Auths.Has "map"}} checked="checked"{{end}}/>
                                 <span>Map</span>
                             </label>
                         </li>
                         <li class="collection-item">
                             <label>
-                                <input type="checkbox" name="auths" value="markers"{{if .User.Auths.Has "markers"}} checked="checked"{{end}}/>
+                                <input type="checkbox" name="auths" value="markers"{{if .Config.Auths.Has "markers"}} checked="checked"{{end}}/>
                                 <span>Markers</span>
                             </label>
                         </li>
                         <li class="collection-item">
                             <label>
-                                <input type="checkbox" name="auths" value="point"{{if .User.Auths.Has "point"}} checked="checked"{{end}}/>
+                                <input type="checkbox" name="auths" value="point"{{if .Config.Auths.Has "point"}} checked="checked"{{end}}/>
                                 <span>Characters</span>
                             </label>
                         </li>
                         <li class="collection-item">
                             <label>
-                                <input type="checkbox" name="auths" value="g1"{{if .User.Auths.Has "g1"}} checked="checked"{{end}}/>
+                                <input type="checkbox" name="auths" value="g1"{{if .Config.Auths.Has "g1"}} checked="checked"{{end}}/>
                                 <span>Group 1</span>
                             </label>
                         </li>
                         <li class="collection-item">
                             <label>
-                                <input type="checkbox" name="auths" value="g2"{{if .User.Auths.Has "g2"}} checked="checked"{{end}}/>
+                                <input type="checkbox" name="auths" value="g2"{{if .Config.Auths.Has "g2"}} checked="checked"{{end}}/>
                                 <span>Group 2</span>
                             </label>
                         </li>
                         <li class="collection-item">
                             <label>
-                                <input type="checkbox" name="auths" value="g3"{{if .User.Auths.Has "g3"}} checked="checked"{{end}}/>
+                                <input type="checkbox" name="auths" value="g3"{{if .Config.Auths.Has "g3"}} checked="checked"{{end}}/>
                                 <span>Group 3</span>
                             </label>
                         </li>
                         <li class="collection-item">
                             <label>
-                                <input type="checkbox" name="auths" value="g4"{{if .User.Auths.Has "g4"}} checked="checked"{{end}}/>
+                                <input type="checkbox" name="auths" value="g4"{{if .Config.Auths.Has "g4"}} checked="checked"{{end}}/>
                                 <span>Group 4</span>
                             </label>
                         </li>
                         <li class="collection-item">
                             <label>
-                                <input type="checkbox" name="auths" value="g5"{{if .User.Auths.Has "g5"}} checked="checked"{{end}}/>
+                                <input type="checkbox" name="auths" value="g5"{{if .Config.Auths.Has "g5"}} checked="checked"{{end}}/>
                                 <span>Group 5</span>
                             </label>
                         </li>
                         <li class="collection-item">
                             <label>
-                                <input type="checkbox" name="auths" value="upload"{{if .User.Auths.Has "upload"}} checked="checked"{{end}}/>
+                                <input type="checkbox" name="auths" value="upload"{{if .Config.Auths.Has "upload"}} checked="checked"{{end}}/>
                                 <span>Upload</span>
                             </label>
                         </li>
                         <li class="collection-item">
                            <label>
-                               <input type="checkbox" name="auths" value="writer"{{if .User.Auths.Has "writer"}} checked="checked"{{end}}/>
+                               <input type="checkbox" name="auths" value="writer"{{if .Config.Auths.Has "writer"}} checked="checked"{{end}}/>
                                <span>Redactor</span>
                            </label>
                         </li>
                         <li class="collection-item">
                             <label>
-                                <input type="checkbox" name="auths" value="admin"{{if .User.Auths.Has "admin"}} checked="checked"{{end}}/>
+                                <input type="checkbox" name="auths" value="admin"{{if .Config.Auths.Has "admin"}} checked="checked"{{end}}/>
                                 <span>Admin</span>
                             </label>
                         </li>
@@ -101,14 +109,12 @@
                     <ul class="collection with-header">
                         <li class="collection-header">
                             <h6>Markers</h6>
-                            <p>Which settings-drawer sections this account can see on the map.
-                                Adding a new section to the codebase automatically adds a new
-                                toggle here.</p>
+                            <p>Which settings-drawer sections public visitors can see on the map.</p>
                         </li>
                         {{range .SectionOptions}}
                         <li class="collection-item">
                             <label>
-                                <input type="checkbox" name="auths" value="sec_{{.Key}}"{{if $.User.Auths.Has (print "sec_" .Key)}} checked="checked"{{end}}/>
+                                <input type="checkbox" name="auths" value="sec_{{.Key}}"{{if $.Config.Auths.Has (print "sec_" .Key)}} checked="checked"{{end}}/>
                                 <span>{{.Label}}</span>
                             </label>
                         </li>
@@ -116,7 +122,6 @@
                     </ul>
                 </div>
                 <button class="btn waves-effect waves-light" type="submit" name="action">Save</button>
-                {{if ne .Username ""}}<a class="waves-effect waves-light red btn" href="/admin/deleteUser?user={{.Username}}">Delete</a>{{end}}
             </form>
 		</div>
         <script src="https://cdnjs.cloudflare.com/ajax/libs/materialize/1.0.0/js/materialize.min.js"></script>

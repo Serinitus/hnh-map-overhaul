@@ -1,0 +1,876 @@
+# Changes from stock Aritain/hnh-map-updated
+
+This is a fresh clone of `Aritain/hnh-map-updated` (`master`, commit
+`c8bfe9c`) with the following changes applied on top. Each item covers
+what changed, which files, why, and anything worth knowing before relying
+on it further.
+
+## 1. Minehole/Ladder markers now recognized and displayed correctly across Nurgling and Kami, with proper icons
+
+**What it does:** Minehole/ladder markers previously either crashed
+non-Nurgling clients outright or landed as unlabeled generic markers,
+depending on which client uploaded them. Both are now recognized and
+rendered with the correct icon regardless of source client.
+
+**Why:** Nurgling's own minehole/ladder icon overrides (`mm/down`/`mm/up`)
+are local to Nurgling's client jar -- they don't exist on the live game
+server. Nurgling was uploading those short names directly as a marker's
+`image`, so any other mapv4 client (Kami, Hurricane) that downloaded and
+tried to render one hit an uncaught `Resource$NoSuchResourceException` and
+crashed. Separately, Kami has its own auto-marking feature
+(`AutoMarkers`/`automark.json5`) for minehole, ladder, tarpit, amber wash,
+flint wash, cave-in, and cave-out -- but Kami's own upload code
+(`MappingClient.ProcessMapper`) never sets the `image`/`type` fields for
+that marker class, only for its other two marker types. Those markers
+still upload, just blank, and previously landed as unlabeled generic
+custom markers.
+
+**Files:** `client.go` (`kamiAutoMarkNames`, in `uploadMarkers`),
+`frontend/src/data/Marker.js` (`detectType`/icon selection),
+`frontend/public/mm/{down,up}.png` (new icon assets -- these didn't exist
+in this repo before and are what the icon URLs actually resolve to)
+
+**How it works:** The actual fix for Nurgling's crash is client-side (in
+Nurgling's own `mapv4/Requestor.java`, not part of this repo) -- it now
+translates `mm/down`/`mm/up` to the real, universally-resolvable gob
+resources `gfx/terobjs/minehole`/`gfx/terobjs/ladder` (verified live,
+HTTP 200) at upload time. This repo's `Marker.js` recognizes both the old
+and new names so already-stored markers keep working. For Kami's blank
+uploads, `uploadMarkers`'s "default to generic custom marker" fallback now
+first checks the marker's `name` against Kami's own `automark.json5`
+display names ("Minehole", "Ladder", "Tarpit", "Amber Wash", "Flint Wash",
+"Cave", "Exit") and recovers the correct image from that instead.
+
+**Potential complications:**
+- Name-matching for the Kami recovery is a heuristic, not a real
+  identifier -- a marker manually named exactly "Ladder" or "Cave" for
+  unrelated reasons would be mis-recognized. Low-stakes (worst case is a
+  cosmetically wrong icon), but not a precise match.
+- Only fixes *new* uploads. Markers already stored under the old
+  `mm/down`/`mm/up` names, or already landed as generic custom markers,
+  stay that way -- the upload handler dedupes by exact grid+position and
+  skips writing if something already exists there.
+- Verified against the live production database (audited separately, not
+  part of this repo) that every historical minehole/ladder marker came
+  from Nurgling's old convention -- Kami's `radar/*` naming has never
+  actually appeared in real data, so this is aimed at correctness/future
+  use more than a fix for an observed live problem.
+
+## 2. Natural Resources: per-category toggle sliders added
+
+**What it does:** The "Natural Markers" section now has an individual
+toggle per resource type (Mineshaft, Burrow, Clam Reef, whatever else
+appears in the data), each with its own icon, instead of one blanket
+show/hide switch for everything.
+
+**Why:** Stock Aritain already tracked `marksCategories` (a list of
+distinct marker types) but never consumed it for anything -- there was no
+UI built on top of it, so it was dead data. This adds that UI.
+
+**Files:** `frontend/src/components/MapView.vue`
+
+**How it works:** New `selectedResourceTypes` array (which categories are
+currently checked) and `resourceCategoryIcons` computed property (one
+representative icon per category, hardcoded to always use the minehole
+icon for the merged "Mineshaft" category regardless of which marker
+populated it first). A `toggleResourceType(cat)` method flips a category
+in/out of `selectedResourceTypes`. All five places that filter/re-render
+resource markers (initial load, map change, overlay toggle, the
+`showMarkers` toggle, and the new `selectedResourceTypes` watcher) now
+check `selectedResourceTypes.includes(marker.type)` in addition to the
+existing checks.
+
+**Potential complications:**
+- All categories start **unchecked** by default -- nothing shows until a
+  category is explicitly toggled on. This matches the reference UX this
+  was modeled after, but is a real behavior difference from stock
+  Aritain's "everything shows unless the blanket toggle is off" default.
+  Worth confirming that's the intended default before relying on it.
+
+## 3. Fixed resource panel leaking Clutter/system markers into the wrong section
+
+**What it does:** Fixes a bug this repo's own change (item 2) exposed --
+Burrow and other `CLUTTER_TYPES` markers, along with this Mapper's
+auto-generated entrance/last-known-position markers, were showing up in
+the new per-category resource panel instead of staying in their own
+sections.
+
+**Why:** `marksCategories.push(it.type)` was unconditional in stock
+Aritain's `updateMarkers()` -- outside the if/else chain that routes
+markers into `thingMarks`/`questMarks`/`clutterMarks`/`otherMarks`. It
+collected the type of *every* marker regardless of which bucket it
+actually went into. This had zero visible effect before, since nothing
+ever read `marksCategories` (see item 2) -- it only became a real bug once
+something finally consumed that list.
+
+**Files:** `frontend/src/components/MapView.vue` (`updateMarkers`)
+
+**How it works:** Moved the `marksCategories` push inside the `else`
+branch, so only markers actually routed to `otherMarks` (real resource
+types) populate it. Separately, entrance/last-known-position markers
+(`image === "gfx/terobjs/mm/custom"`, generated by this Mapper itself when
+a new map layer is discovered -- see item 4) are now excluded from every
+visible bucket entirely, rather than being folded into Clutter (which
+should stay actual game-world resources) or showing as their own
+resource-panel category.
+
+**Potential complications:**
+- The dedicated, admin-placed "Custom Markers" feature (a completely
+  separate system -- its own backend bucket, its own API, its own
+  `showCustomMarkers` toggle) is untouched by this. The exclusion here
+  only affects auto-generated markers that happen to share the same
+  generic image string, not that feature.
+
+## 4. New mine layers now align to their entry point instead of resetting to {0,0}
+
+**What it does:** When a client reports grids for a brand-new,
+previously-unregistered map (e.g. descending into an unmapped mineshaft),
+the first grid's coordinate is now seeded from the coordinate of the grid
+the player was standing on immediately before the transition, instead of
+always starting at `{0, 0}`. Mine layers connected by a ladder/minehole
+now tend to line up spatially instead of each resetting its own
+coordinate frame. As a side effect, a marker labeled with the new layer's
+name gets dropped at the entry point on the layer the player came from, so
+the connection is visible from either side.
+
+**Files:** `main.go` (`LastPosition` type, `Map.lastPos` field),
+`client.go` (`updatePositions`, `gridUpdate`)
+
+**How it works:** `updatePositions` now records each player's last known
+position (map, grid, local offset, timestamp) keyed by username, pulled
+from the request context that was already wired through this repo's
+`client()` dispatcher for other handlers. `gridUpdate`'s new-map-creation
+path checks for a recent (<30s) last position on a *different* map; if
+found, it seeds the new map's coordinate origin from that position's grid
+coordinate and drops the entrance marker.
+
+**Potential complications:**
+- Known limitation: teleports (not physical ladder/minehole transitions)
+  will seed an arbitrary/wrong origin on first discovery of a location
+  reached that way. Self-corrects the next time that location is reached
+  via its actual physical connection, since the grids will already be
+  registered by then.
+- New per-username in-memory state (`lastPos`) that didn't exist before --
+  small footprint, never persisted, cleared implicitly by the 30-second
+  staleness check but never actively evicted otherwise. Not a real problem
+  in practice (bounded by distinct usernames ever seen), just worth
+  knowing it's there.
+
+## 5. Compatibility with Kami's "Export 2 Mapper (V1)" **(needs to run twice, but does function)**
+
+**What it does:** Kami's map window has an "Export 2 Mapper (V1)" button
+(`MapFile.exportToMapper`) that bulk-uploads a player's entire locally
+cached map history in one pass, separate from the normal per-login
+upload. It was calling three routes (`gridCacheUpdate`, `gridCacheUpload`,
+`gridCacheOverlayUpload`) this repo never implemented at all, so every
+request 404'd silently and the button has likely never worked against any
+modern mapv4 server.
+
+**Files:** `client.go`
+
+**How it works:** Added the three routes to the `/client/{token}/{action}`
+dispatcher. `gridCacheUpdate` registers an entire segment's grids at once
+(the payload already carries relative x/y per grid, unlike the
+position-tracking-oriented `gridUpdate`), reusing an existing map if any
+given grid is already known, or creating a new one otherwise.
+`gridCacheUpload` aliases the existing `gridUpload` handler directly,
+since the multipart payload shape already matches. `gridCacheOverlayUpload`
+accepts and discards -- overlay tiles aren't rendered anywhere in this
+codebase.
+
+**Potential complications -- confirmed by testing, not theoretical:**
+- Grid *registration* reaches ~100% of the reported total in a single
+  pass every time (it's pure metadata, always available).
+- Tile *image* uploads are bottlenecked client-side, not server-side:
+  Kami re-renders each tile from local cache before uploading, and a grid
+  whose data isn't currently loaded produces no image and no request at
+  all -- not a rejection, just nothing sent. A first run typically
+  captures a small fraction of the total. Running the export a second
+  time (from the same location, without even moving) captures dramatically
+  more -- most likely because the first pass's render attempts trigger
+  background data loading that the second pass then benefits from. In one
+  test: run 1 landed 155/16,738 tiles; run 2 (same spot, no movement)
+  reached 419+ and climbing. A separate earlier test on another instance
+  went from 150 to 16,632 between runs. **Practical takeaway: always run
+  the export at least twice before concluding it under-performed.**
+
+## 6. Natural Resources panel filtered to known types, with an admin-only "Other" section for anything unrecognized
+
+**What it does:** The per-category resource toggle panel (item 2) now only
+lists types this Mapper actually recognizes as real game resources. Any
+auto-marked type that isn't recognized is routed to a separate "Other
+(Admin)" section instead of adding a new row to the main panel -- visible
+only to admin accounts, off by default.
+
+**Why:** Item 2 made every distinct marker type spawn its own toggle row,
+including malformed/garbage types from client upload bugs -- exactly the
+kind of "random broken resource fragments" the per-category panel was
+supposed to clean up in the first place. Cross-checking against another
+public Haven & Hearth mapper's own marker legend gave a concrete list of
+real, vetted resource categories to allowlist against.
+
+**Files:** `frontend/src/components/MapView.vue` (`KNOWN_RESOURCE_TYPES`,
+`otherMarksAdmin`/`unknownCategories`/`selectedUnknownTypes` state, the
+routing split in `updateMarkers`, the "Other (Admin)" panel)
+
+**How it works:** A marker's type (already computed the same way as before
+-- see item 1/2) is checked against `KNOWN_RESOURCE_TYPES`. Known types
+route into the existing `otherMarks`/`marksCategories` pair unchanged.
+Unknown types route into a parallel `otherMarksAdmin`/`unknownCategories`
+pair, rendered as its own toggle list gated behind `auths.includes('admin')`
+in the template, structured identically to the main panel. This is purely
+a display-side filter -- unrecognized markers are still stored and still
+uploaded normally, just not shown to regular players until an admin
+reviews the "Other" section and (if it's a real resource) the allowlist
+gets updated to include it.
+
+**Potential complications:**
+- The allowlist is a fixed list of type strings, not derived from live
+  data, so a resource that exists in-game but wasn't present in the data
+  used to build/verify this list could initially land in "Other" until
+  someone notices and adds it. Confirmed and fixed once already during
+  testing (`lilypad`/`saltbash`/`ancientwindthrow`/`heartwood` guesses
+  didn't match the real type strings -- corrected to
+  `lilypadlotus`/`saltbasin`/`windthrow`/`woodheart` after checking against
+  actual uploaded data). This is self-correcting by design: nothing is
+  ever dropped, just temporarily miscategorized.
+- "Other (Admin)" only appears for accounts with the `admin` auth --
+  `writer` accounts do not see it, unlike some other admin/writer-shared
+  controls elsewhere in this panel.
+
+## 7. Per-account control over which Markers sections are visible, plus a dedicated Public-access settings section
+
+**What it does:** Each user account now has a "Markers" checkbox group
+(Natural Resources, Custom Markers, Clutter, Players, Thingwalls, Vortexes,
+Quest Givers, Roads, Other) alongside its existing Roles checkboxes,
+controlling which settings-drawer sections that account sees on the map.
+Separately, per-map "Required Tier" locking was added to the existing
+Hidden/Priority map-edit page. And a new "Public" link next to "Add user"
+opens a dedicated settings page -- not a user account, no username or
+password -- with one master "Enable Public Access" switch plus the same
+Roles/Markers checkboxes, controlling exactly what a visitor with no
+login at all can see. When enabled, the site's home page (`/`) serves the
+map directly instead of the login screen for anyone without a session,
+and the map's account menu shows a plain "Login" link instead of a
+username.
+
+**Why:** Two earlier iterations landed here. The first was a single global
+"required tier" dropdown per section, edited in one shared admin card --
+replaced because it didn't match how every other permission in this app
+already works (one checkbox list per account, edited on that account's own
+page). The second represented "no login" as a literal fake user account
+(`Not Logged In`) that anonymous requests resolved to -- workable, but
+confusing: it showed up in the Users table like a real account, could be
+edited/deleted the same way, and had no separate on/off switch, so its
+mere existence silently turned public access on. Splitting it into its own
+non-user settings section with an explicit Enabled toggle makes the
+public/private state a single, deliberate switch instead of an implicit
+side effect of whether a specific row exists in the Users table.
+
+**Files:** `admin.go` (`SectionOption`/`sectionOptions`, `TierOption`/
+`tierOptions`, `adminPublic`), `templates/admin/user.tmpl` (Markers
+checkbox group, looped from `SectionOptions`), `templates/admin/
+public.tmpl` (new -- Enable switch + Roles + Markers, no username/
+password/delete), `templates/admin/map.tmpl` (Required Tier select),
+`templates/admin/index.tmpl` (Public link, lit green when enabled),
+`main.go` (`MapInfo.RequiredAuth`, `PublicConfig`, `getPublicConfig`,
+`getSessionOrPublic`), `manage.go` (`index` redirects anonymous visitors
+to `/map/` when Public is enabled), `map.go` (`Config.Public`, `getMaps`
+tier filtering; `config`, `getChars`, `getMarkers`, `getPingSound`
+switched to `getSessionOrPublic`), `roads.go` (`getRoads`),
+`custommarkers.go` (`getCustomMarkers`), `tile.go` (`gridTile`,
+`watchGridUpdates`), `frontend/src/components/MapView.vue`
+(`canSeeSection`, `isPublic`/Login link, `showVortexes`/`vortexMarks` as a
+new dedicated top-level bucket alongside Thingwalls/Quest Givers, since
+Vortexes needed its own toggle rather than living inside the Natural
+Resources per-category panel)
+
+**How it works:** `PublicConfig{Enabled bool, Auths Auths}` is stored as
+one JSON blob under the `config` bucket's `"public"` key -- not a row in
+`users` at all. `getSessionOrPublic` returns the real session if one
+exists; otherwise, only if `Enabled` is true, it returns a synthetic
+`Session` (empty `Username`, `Auths` from `PublicConfig`) standing in for
+the request. That's used only in read-only, map-viewing handlers (listed
+above), never in any write or `/admin/*` handler, which all still call
+`getSession` directly and redirect to `/login` on `nil` regardless of the
+Public setting. `Config.Public` (`s.Username == ""`) tells the frontend
+this is an anonymous session so it can swap the account menu for a
+"Login" link and hide the "Tokens" shortcut. `canSeeSection(key)` is just
+`auths.includes('sec_' + key)`, so it works identically whether `auths`
+came from a real login or the Public fallback. Separately, `MapInfo.
+RequiredAuth` extends the pre-existing `Hidden` flag with the same
+tier-dropdown mechanism (`getMaps` now checks it exactly like `Hidden`) --
+this part is independent of the Public/per-account work and addresses a
+different scope (whole map layers, not settings-drawer sections).
+
+**Potential complications:**
+- This is a real, if narrow, security-relevant change: it's the first
+  code path in this codebase that serves data to a request with no
+  authenticated session. It's scoped tightly (read-only GET handlers only,
+  off by default, one explicit Enabled switch) but should get a second
+  look before relying on it in production.
+- Markers-section defaults are deny, same as every other Roles checkbox
+  already worked -- including for the `admin` account itself, which needed
+  its own Markers boxes checked after this shipped or its own map view
+  would show nothing. Confirmed and fixed during testing on this instance;
+  worth remembering before deploying this change anywhere with existing
+  accounts.
+- Public access is one fixed set of auths shared by every visitor with no
+  cookie -- there's no way to give different anonymous visitors different
+  access, and it's a single global switch, not per-map or per-IP.
+- Verified end-to-end on this instance: a real credential-less `fetch`
+  correctly received only the configured auths, `/` correctly redirected
+  to `/map/`, `/admin/*` correctly stayed blocked, and the drawer correctly
+  showed only the granted sections (plus the always-ungated Grid
+  Coordinates/Players Names/Hide Character Names) with nothing else
+  leaking through.
+- `logout` also redirects to `/map/` instead of `/login` when Public
+  access is enabled, for the same reason `index` does -- logging out of a
+  real account should land you in the public experience, not a login wall,
+  on an instance that has one.
+- "Players" is intentionally not one of the Markers checkboxes (see the
+  comment on `sectionOptions` in admin.go). It's the one section that
+  already had a real, server-enforced auth doing this exact job (`point`,
+  labeled "Characters" in Roles, checked in `getChars`) -- a second
+  `sec_players` checkbox would only have been a UI switch that had to
+  agree with the actual data-access switch to do anything. The Players
+  toggle in `MapView.vue` checks `auths.includes('point')` directly
+  instead. Every other section (Natural Resources, Clutter, Thingwalls,
+  etc.) has no such pre-existing per-category auth -- `getMarkers()` gates
+  all of them behind one blanket `markers` role -- so `sec_*` is the only
+  granularity that exists for those and isn't redundant.
+
+## 8. Self-service /settings page for personal character-display preferences
+
+**What it does:** Players Names and Hide Character Names are no longer
+admin-managed drawer toggles -- they're personal preferences on a new
+`/settings` page any logged-in account can reach from the account menu
+(next to Admin/Logout), and they now persist per-account instead of
+resetting to on every page load.
+
+**Why:** Unlike every other drawer toggle, these two aren't about what
+data an account is allowed to see -- they're purely about how that one
+account wants character names displayed to them. That's a personal
+preference, not something that belongs in an admin-configured visibility
+system, and it's the kind of setting a user should be able to change for
+themselves without asking an admin to edit their account.
+
+**Files:** `settings.go` (new), `templates/settings.tmpl` (new),
+`templates/navbar.tmpl` (Settings link), `main.go` (`User.
+ShowPlayerNames`/`HideCharacterNames` as `*bool`, `/settings` route),
+`map.go` (`Config.ShowPlayerNames`/`HideCharacterNames`, populated from
+the account's stored `User` record in `config`),
+`frontend/src/components/MapView.vue` (drawer rows removed, `processConfig`
+reads the persisted values, account-menu Settings link)
+
+**How it works:** Stored as `*bool` on `User`, not plain `bool` -- an
+account that's never visited `/settings` has both fields `nil`, which
+`config()` omits from the JSON response entirely (`omitempty`) rather than
+serializing as `false`. The frontend only overrides its own default
+(`true`) when the field is actually present, so no existing account's
+behavior changed the moment this shipped. The settings page itself still
+hides both checkboxes for an account without `point`, matching the
+existing Players/Characters reasoning in item 7.
+
+## 9. Fixed a pre-existing bug: turning off "Players" didn't stick
+
+**What it does:** Unchecking Players (or Players Names/Hide Character
+Names being off) used to only last until the next character-position poll
+(every 2 seconds, sometimes sooner if a request was already in flight) --
+the player markers would silently reappear on their own.
+
+**Why:** This predates every change in this document -- confirmed via
+`git log` that `frontend/src/data/Character.js` and the polling loop in
+`MapView.vue` were untouched by any of our own work before this fix.
+`Character.update()` (called every time the 2-second poll in `setupMap`
+re-fetches character positions) had `if (!this.marker && this.map ===
+mapview.mapid) { this.add(mapview); }` -- it only knew "do I have a
+marker," not "is Players even enabled." Turning Players off removes every
+marker (`this.marker = null`), and the very next poll cycle saw no marker
+and silently added it right back, with no idea the removal was
+deliberate.
+
+**Files:** `frontend/src/data/Character.js` (`update` now takes a
+`visible` parameter), `frontend/src/components/MapView.vue`
+(`updateCharacters`'s Add callback now checks `this.showPlayers`; its
+Update callback passes `this.showPlayers` through to `character.update`)
+
+**How it works:** `Character.update(mapview, updated, visible)` only
+auto-re-adds a missing marker when `visible` is true, and both call sites
+in `updateCharacters` now pass `this.showPlayers` for that argument --
+the same gate `updateMarkers`'s equivalent callback already had for every
+other marker type. Turning Players off now stays off across polls, same
+as every other toggle in the drawer.
+
+## 10. Drawer redesign: left-side icon toggles, and name-visibility as its own control on Thingwalls/Quest Givers/Players
+
+**What it does:** Every drawer row's on/off switch is now a green/red eye
+icon on the left of the label (green `mdi-eye` = shown, red `mdi-eye-off`
+= hidden) instead of the old full-width switch button. Thingwalls, Quest
+Givers, and Players additionally get a second icon -- a green
+checkmark/red-X speech-bubble (`mdi-comment-check-outline`/`mdi-comment-
+remove-outline`) -- controlling whether that marker type's name tooltip
+stays pinned open, independent of the eye. Natural Markers and Other
+(Admin) keep their expandable per-category sub-panel, now opened with an
+explicit chevron on the row's right edge instead of automatically
+following the eye -- collapsing that panel no longer hides the markers,
+and hiding the markers no longer force-collapses the panel.
+
+**Why:** Thingwalls and Quest Givers previously had their tooltips
+hardcoded permanently on (`it.tooltip(true)`) with no way to turn them
+off at all. Players already had a names toggle, but it lived on the
+`/settings` page (item 8) -- putting an equivalent control back inline
+next to the Players eye makes that page redundant for this one case,
+which is fine since nothing else needs the same treatment yet. Decoupling
+the sub-panel's open/closed state from the eye toggle was a deliberate
+UX call: whether a section's markers show on the map and whether its
+category list is open in the drawer are different questions, and forcing
+them together meant you couldn't glance at (or edit) Natural Resources
+categories while that section was hidden.
+
+**Files:** `frontend/src/components/IconToggle.vue` (new, replaces the
+deleted `ToggleButton.vue`), `frontend/src/components/MapView.vue` (every
+drawer row, `showThingwallNames`/`showQuestNames`/`naturalMarkersExpanded`/
+`otherExpanded` state, tooltip wiring throughout `showThingwalls`/
+`showQuests`/the overlay and map-change handlers/`updateMarkers`)
+
+**How it works:** `IconToggle` is a generic `v-icon` wrapper taking
+`value`/`onIcon`/`offIcon`/`onColor`/`offColor` props and emitting
+`input` on click -- the eye pair is its default, the comment-bubble pair
+is passed explicitly for the three name-toggle rows. `showThingwallNames`/
+`showQuestNames` replace every hardcoded `it.tooltip(true)` for those two
+marker types (six call sites: the `showThingwalls`/`showQuests` watchers,
+both branches of the `overlayMap` watcher, `changeMap`, and the initial
+`tstate` assignment in `updateMarkers`) plus new watchers that reapply
+`.tooltip(value)` across already-rendered markers when toggled, the same
+pattern used for `showPlayerTooltips`/`showUnknownMarkers`/etc. The
+Natural Markers/Other sub-panels swapped their `v-if` from `&&
+showMarkers`/`&& showUnknownMarkers` to `&& naturalMarkersExpanded`/`&&
+otherExpanded`, toggled only by the new chevron, with no other change to
+what the eye itself controls.
+
+**Potential complications:**
+- The Players names icon and the `/settings` page's Players Names
+  checkbox are two controls over the same `showPlayerTooltips` model by
+  design -- confirmed intentional (this item exists partly because the
+  user pointed out the drawer icon makes the settings-page version
+  redundant for this one row). Not a bug; both stay in sync since they
+  share the same underlying value.
+- Vortexes, Roads, Custom Markers, Clutter, Grid Coordinates don't get a
+  names icon -- there's no per-item name/tooltip concept for those marker
+  types to toggle. Thingwalls/Quest Givers/Players were called out
+  explicitly as the starting set to test this pattern on; extending it
+  further (per the original ask, Natural Resources/Clutter/Roads/etc.)
+  would need real per-marker-type tooltip support added first, not just a
+  UI toggle.
+- Verified interactively end-to-end after deploying: eye click flips
+  icon+color and actually hides/shows markers on the map; name-bubble
+  click flips independently; expanding Natural Markers' category list,
+  then turning its eye off, leaves the list open (previously it would
+  have force-collapsed).
+
+## 11. Unified search bar replaces the four separate Thingwall/NPC/Marker/Player dropdowns, and fixes a real reselect bug in the process
+
+**What it does:** One search field now covers Thingwalls, Quest Givers,
+Custom Markers, and Players together (icon + name + type label per
+result), replacing four separate `v-autocomplete` dropdowns. Selecting a
+result homes the map in on it exactly like the old dropdowns did. Along
+the way, this fixes a genuine bug: re-selecting the same single result
+twice in a row (e.g. only one player online) previously did nothing the
+second time, requiring a full page reload to "unstick" it.
+
+**Why:** The four-dropdown layout was already earmarked for a rebuild
+(unifying them into one search-as-you-type control), so the fix went into
+the new mechanism directly rather than patching the code being replaced.
+The reselect bug's root cause was structural, not a one-line typo: each
+dropdown drove its jump-to logic through a Vue `watch` on its `v-model`,
+and Vue only re-fires a watcher when the value actually *changes* --
+picking the same object out of a list with only one entry assigns the
+same reference back to itself, so nothing fires and nothing re-centers.
+Any fix scoped to "patch the watcher" would've had to fight that
+same-value problem four separate times, once per dropdown.
+
+**Files:** `frontend/src/components/MapView.vue` (`searchItems` computed,
+`searchSelection` state, `jumpToSearchResult`/`jumpToMapMarker`/
+`jumpToCharacter` methods, `trackingCharacterId` watcher simplified to
+call `jumpToCharacter`, the four old `selectedThing`/`selectedQuest`/
+`selectedCustomMarker`/`selectedPlayer` watchers and data fields removed)
+
+**How it works:** `searchItems` normalizes `thingMarks`/`questMarks`/
+`customMarks`/`players` (four differently-shaped arrays) into one flat
+list of `{searchType, name, icon, typeLabel, raw}`, which the single
+`v-autocomplete` filters by `name` as you type. The fix for the reselect
+bug: selection is handled by `@change="jumpToSearchResult"` -- a real DOM
+event Vuetify fires on every selection, including picking the same item
+twice -- instead of a `watch` on the bound value. `jumpToSearchResult`
+dispatches on `item.searchType`: players go through `jumpToCharacter`
+(extracted from the old `trackingCharacterId` watcher body, now called
+directly so it runs even when `trackingCharacterId`'s value doesn't
+change), everything else through `jumpToMapMarker` (the identical body
+that used to be duplicated across three separate watchers). The search
+field clears itself via `$nextTick` after each jump, ready for the next
+search.
+
+**Potential complications:**
+- Verified directly: selected the same Thingwall twice with the map
+  panned away in between (`map.getCenter()` checked before/after) --
+  both selections correctly re-centered on it. Couldn't verify the player
+  path the same way in this session (no live character was online in the
+  test data at verification time), but it runs through the exact same
+  `jumpToSearchResult` -> direct-method-call path, not a watcher, so the
+  same fix applies.
+- The four old dropdowns' per-type item templates (thingwall/quest icons
+  from `.image`, custom marker icons from `.color`) are preserved as
+  `icon`/`typeLabel` in the normalized list; players have no icon image
+  today and fall back to a generic `mdi-account` glyph in the results
+  list.
+
+## 12. Clutter gets the same per-category toggle panel as Natural Markers/Other
+
+**What it does:** Clutter is no longer one blanket on/off switch for
+burrow, clamreef, flintwash, and spawningbed all at once -- expanding it
+(same chevron pattern as Natural Markers/Other) shows one switch per
+type, so turning Clutter on doesn't mean showing all of it.
+
+**Why:** Directly requested: enabling Clutter previously meant every
+clutter type appeared together with no way to see just one kind (e.g.
+burrows without also getting spawning beds).
+
+**Files:** `frontend/src/components/MapView.vue`
+(`selectedClutterTypes`/`clutterExpanded`/`clutterCategories`/
+`clutterCategoryIcons`/`toggleClutterType`, every `clutterMarks` filter
+site, the per-marker visibility ternary in `updateMarkers`)
+
+**How it works:** Identical structure to Natural Markers/Other's existing
+per-category panels (`selectedResourceTypes`/`marksCategories`/etc.) --
+`clutterCategories` is populated the same way during the marker-routing
+pass in `updateMarkers`, and every place that already filtered on
+`showClutter` now also checks `selectedClutterTypes.includes(it.type)`.
+
+**Potential complications:**
+- Verified live: with `showClutter` on and only `burrow` selected, 218
+  burrow markers rendered and zero markers of the other three clutter
+  types did, confirming the filter is exclusive rather than additive-only.
+
+## 13. Replaced the "Draw Road" button with an inline Edit icon on Roads; drawer section reorder; a real app-bar/drawer layout bug fix; Overlay Map gets its own visibility toggle
+
+**What it does:** Four unrelated-but-simultaneous changes to the drawer:
+(1) the old full-width "Draw Road"/"Cancel Draw Road" button is gone,
+replaced by a green/blue pencil-note icon next to the Roads eye (same
+`IconToggle` component as everywhere else, labeled "Edit"); (2) drawer
+sections were reordered (Search, Grid Coordinates, Thingwalls, Vortexes,
+a new collapsible "Map" group, Natural Markers, Quest Givers, Players,
+Roads, Custom Markers, Clutter, Other (Admin)); (3) Jump To Map and
+Overlay Map are now grouped under that "Map" section with the same
+expand-chevron pattern as Natural Markers/Clutter/Other, instead of
+sitting bare at the top of the drawer; (4) Overlay Map gets its own eye
+icon, toggling the overlay's visibility independent of which map is
+selected -- turning it off no longer clears the dropdown, turning it back
+on instantly restores the same overlay.
+
+**Why:** All requested together as one pass at getting the drawer closer
+to a final design (a reference mockup was provided). The Edit icon
+replaces a control that was visually and functionally inconsistent with
+the rest of the redesigned drawer (item 10) -- a large standalone button
+next to a list of compact icon rows. The reorder and Map group match the
+supplied mockup directly. The separate app-bar layout bug (below) was
+found and fixed while verifying the reorder, not requested on its own.
+
+**Files:** `frontend/src/components/MapView.vue` (drawer template
+reorder; Roads row's Edit `icon-toggle`; `mapSectionExpanded`/
+`showOverlayMap` state; `applyOverlayMap` method; `.v-navigation-drawer`/
+`.v-app-bar` CSS; `:mini-variant-width="36"`; `.draw-road-btn` CSS removed
+along with the button)
+
+**How it works:**
+- The Edit icon binds `:value="drawingRoad"` / `@input="toggleDrawRoad"`
+  rather than `v-model`, since `toggleDrawRoad` flips the state itself
+  (and clears `roadPoints`/a temp marker) rather than accepting the new
+  value as a parameter -- `v-model` would have bypassed that cleanup.
+- The overlay visibility toggle required extracting the old `overlayMap`
+  watcher's entire body (previously ~100 lines duplicated across two
+  branches, one per selected/cleared state) into a new `applyOverlayMap()`
+  method, unchanged internally, that now computes its effective "is there
+  an overlay to show" value from `showOverlayMap && overlayMap` instead of
+  just `overlayMap`. Both `overlayMap` and `showOverlayMap` are now thin
+  watchers that just call it. Toggling visibility off sets
+  `overlayLayer.map = -1` (exactly what clearing the dropdown already
+  did) without touching the `overlayMap` selection itself.
+- **The app-bar/drawer layout bug (found via direct measurement, not
+  visual inspection alone -- `getBoundingClientRect()` on both elements):**
+  the navigation drawer was rendering at `top:0`, directly under the
+  56px-tall app-bar instead of below it, for reasons that weren't fully
+  traceable to a single Vuetify setting (its automatic `app`-prop
+  coordination simply wasn't kicking in here). Fixed by pinning
+  `.v-navigation-drawer { top: 56px !important }` directly. That fix then
+  exposed a second, related mismatch: Vuetify's internal layout
+  bookkeeping was reserving its own default 56px for the collapsed
+  (mini-variant) drawer width, while a separate pre-existing rule
+  (`.v-navigation-drawer { width: auto !important }`, not something this
+  session added) was visually shrinking it to 36px to fit its actual
+  content (just the expand-arrow icon) -- the 20px gap between what
+  Vuetify thought it reserved and what was actually there was pushing the
+  app-bar and the map's Leaflet zoom control 56px right of where they
+  should have been. Fixed by adding `:mini-variant-width="36"` so
+  Vuetify's bookkeeping matches the real rendered width. Finally, by
+  default Vuetify's `app`-aware app-bar shrinks itself to make room
+  beside the drawer -- the design wants it spanning the full width
+  edge-to-edge instead with the drawer entirely below it, so `.v-app-bar`
+  now force-overrides `left: 0` / `width: 100%`.
+
+**Potential complications:**
+- Verified all three layout numbers directly via `getBoundingClientRect()`
+  before and after: app-bar now spans the full viewport width at
+  `left:0`, the drawer starts at `top:56` with no vertical overlap, and
+  the Leaflet zoom control sits cleanly at the collapsed drawer's right
+  edge (`left:36`) instead of 56px further right than it should have
+  been.
+- Verified the overlay toggle's actual effect on `overlayLayer.map`
+  directly: selecting a map set it to that map's ID, toggling visibility
+  off set it to `-1`, toggling back on restored the original ID without
+  needing to reselect anything.
+- The drawer's expanded width (228px) wasn't changed in this pass --
+  worth confirming with the mockup once the layout bug fix is visible,
+  since some "sidebar too wide" perception may have been the overlap bug
+  itself rather than the width.
+
+## 14. Thingwall icons scale with zoom (matching live), plus a personal scale slider on /settings
+
+**What it does:** Thingwall icons now shrink as you zoom out instead of
+staying a fixed 90x90px at every zoom level -- matching how the live
+server (per a separate unmerged fork) already renders them. On top of
+that live-matching default, `/settings` gets a "Thingwall Icon Scale"
+slider (0.25x-2x, default 1x = unmodified live behavior) so an account
+can size them smaller or larger to taste.
+
+**Why:** Directly requested, with an explicit goal of matching live
+before considering sharing this branch with Aritain. The fixed-size
+icons were the one visibly "unclean" difference from live; the slider is
+the "give people the option" half of the request, layered on top rather
+than replacing the live default.
+
+**Files:** `frontend/src/data/Marker.js` (`iconScale`, `buildIcon`,
+`rescale`), `frontend/src/components/MapView.vue` (`thingwallScale`
+state read in `processConfig`, `rescale` wired into the existing `"zoom"`
+map event), `settings.go`/`templates/settings.tmpl` (slider UI, `0.25`-`2`
+clamped and defaulted to `1` server-side), `main.go` (`User.
+ThingwallScale *float64`), `map.go` (`Config.ThingwallScale`)
+
+**How it works:** `iconScale(zoom) = max(0.35, 0.75^levelsOut)` where
+`levelsOut` is how many zoom levels below `HnHMaxZoom` the map currently
+is -- 1 (full size) at max zoom, shrinking 25% per level out, floored at
+35% so icons never disappear. Thingwalls' half-size becomes `round(45 *
+iconScale(zoom) * thingwallScale)` (every other marker type's sizing is
+untouched, unchanged from before). Icon *building* was extracted from
+`add()` into `buildIcon(zoom, thingwallScale)` so a new `rescale(mapview)`
+method can call `marker.setIcon(...)` with a freshly computed size on
+every zoom change, without recreating the marker (tooltip-open state,
+listeners, etc. all survive) -- wired into the map's existing `"zoom"`
+event handler, scoped to `thingMarks` only. The slider itself follows the
+exact same nil-means-unset persistence pattern as items 8/9's Players
+Names/Hide Character Names (`*float64` on `User`, omitted from `Config`
+JSON when never set, frontend keeps its own default of `1` in that case).
+
+**Potential complications:**
+- Verified live end-to-end, not just read from code: set the slider to
+  1.5x, saved, confirmed `/map/api/config` returned `1.5`, then read a
+  real Thingwall marker's actual rendered Leaflet icon size at two
+  different zoom levels -- 48px at zoom 1 and 136px at max zoom 9 --
+  both matching the formula's predicted output exactly
+  (`round(45*0.35*1.5)*2=48`, `round(45*1*1.5)*2=136`), confirming the
+  live rescale-on-zoom wiring actually fires, not just the initial
+  render.
+- The live-server "default" is based on formula/values found in a
+  separate unmerged fork repo on this machine (`HnH Mapper - Serin
+  Fork`), not independently verified against the actual live site itself
+  -- worth a visual side-by-side once this deploys, in case that fork
+  had since drifted from what's really live.
+
+## 15. Thingwall scale slider raised to 4x max; drawer row labels aligned
+
+**What it does:** Two small follow-ups to items 13/14: the Thingwall
+Icon Scale slider's max is now 4x instead of 2x (both the HTML `max`
+attribute and the server-side clamp in `settings.go`). Separately, every
+drawer row's label now starts at the same horizontal position regardless
+of how many icons precede it -- previously a two-icon row (Thingwalls,
+Quest Givers, Players) pushed its label further right than a one-icon
+row (Grid Coordinates, Vortexes, etc.), since the icons sat directly
+inline before the label with no reserved space.
+
+**Files:** `templates/settings.tmpl`/`settings.go` (slider max),
+`frontend/src/components/MapView.vue` (`.row-icons` CSS class, applied to
+every drawer row's icon-toggle(s))
+
+**How it works:** `.row-icons` is a fixed 64px-wide flex container
+(sized for the widest case, two icons) wrapping each row's icon-toggle(s)
+-- including an empty one on the "Map" section header, which has no icon
+at all, so its label lines up too. Labels sit outside that container, so
+they always start at the same X offset whether the row has zero, one, or
+two icons inside it.
+
+**Potential complications:**
+- Verified directly via `getBoundingClientRect()` on all eleven section
+  labels (Grid Coordinates through Other (Admin)) -- every one starts at
+  exactly the same `left` pixel value now.
+
+## 16. Mineholes & Caves split into their own toggle (Natural Resources renamed); Map section framed and right-aligned; reference marker icons added to Thingwalls/Vortexes/Mineholes & Caves
+
+**What it does:** Three more drawer changes. (1) "Natural Markers" is
+renamed "Natural Resources", and Mineholes/Caves -- previously two
+entries mixed into that section's per-category panel alongside every
+other resource type -- get pulled out into their own simple standalone
+toggle row directly below it (no per-category breakdown, just one on/off
+switch for both, same pattern as Vortexes/Custom Markers). (2) The "Map"
+section header gets a white top/bottom border and its label right-aligned
+next to the chevron instead of following the standard left-aligned
+pattern, visually setting it apart as its own framed region. (3)
+Thingwalls, Vortexes, and the new Mineholes & Caves row each show their
+actual in-game marker icon(s) on the right edge, aligned among
+themselves via a new `.row-marker-icons` class (mirroring `.row-icons`
+from item 15, but right-aligned and for reference images instead of
+functional toggles).
+
+**Why:** All directly requested. Splitting Mineholes/Caves out mirrors
+the same reasoning as item 12's Clutter split (a blanket toggle covering
+unrelated categories) but scoped to just this one pair rather than a
+full per-category panel, since two merged-icon types don't need one.
+
+**Files:** `frontend/src/components/MapView.vue` (`showMineCave`/
+`mineCaveMarks` state, watcher, `applyOverlayMap` branches, `changeMap`
+branch, `updateMarkers` routing + visibility ternary, force-off list,
+`.row-marker-icons` CSS, template changes for all three items;
+`KNOWN_RESOURCE_TYPES` no longer lists `mineshaft`/`cave`;
+`resourceCategoryIcons`' now-unreachable Mineshaft/Cave special-casing
+removed)
+
+**How it works:**
+- Mineholes & Caves is structurally a straight copy of the Vortexes
+  pattern (`showVortexes`/`vortexMarks`) applied to a new
+  `showMineCave`/`mineCaveMarks` pair, gated by the same
+  `canSeeSection('naturalMarkers')` as Natural Resources since it's the
+  same underlying data/permission, just a second row. The
+  `updateMarkers` routing pass now checks `it.type === "Mineshaft" ||
+  it.type === "Cave"` *before* the general `KNOWN_RESOURCE_TYPES` branch,
+  so those two types never reach the old bucket at all.
+- The Map header's border/right-alignment is plain CSS/template
+  reordering on that one row -- no functional change, `v-spacer` now
+  comes before the label instead of after.
+- The marker-icon images are static -- Thingwalls/Vortexes have one
+  fixed icon each (`gfx/terobjs/mm/thingwall.png`/`watervortex.png`),
+  Mineholes & Caves shows both merged-category icons side by side
+  (`mm/down.png`, `gfx/hud/mmap/cave.png`), matching the same icons
+  already used elsewhere (e.g. the old `resourceCategoryIcons`
+  special-casing this replaces).
+
+**Potential complications:**
+- Verified live: `marksCategories` (Natural Resources' per-category list)
+  no longer contains "Mineshaft"/"Cave"; `mineCaveMarks` correctly holds
+  both types (11 markers in the test data); toggling the new row's eye
+  off actually removed all 11 from the map and back on restored them;
+  all three rows' `.row-marker-icons` containers right-align to the exact
+  same pixel edge, and every image (`naturalWidth > 0`) loaded
+  successfully rather than 404ing.
+
+## 17. Corrections to item 16: Mineholes/Caves as two separate toggles, Map back to left-aligned with more separation, and click-to-expand on the label text
+
+**What it does:** Three corrections after review of item 16. (1)
+Mineholes and Caves are now two fully independent standalone toggle rows
+(`showMineholes`/`mineholeMarks` and `showCaves`/`caveMarks`), not one
+combined switch controlling both -- each keeps its own reference icon on
+the right. (2) The "Map" section reverts to left-aligned (matching every
+other row) instead of right-aligned, keeps its white top/bottom border,
+and gets 10px of margin outside those borders so they read as visible
+separation from the rows above/below instead of sitting flush against
+them. (3) Every expandable section (Map, Natural Resources, Clutter,
+Other (Admin)) is now clickable across its entire label-to-arrow span,
+not just the small chevron icon itself.
+
+**Why:** Direct correction of a misread ("right aligned" was a mistake,
+left-aligned was intended) and a design call reversed after seeing it
+live (two independent toggles instead of one combined). The click-target
+expansion was a usability ask on top of the existing expand/collapse
+sections from earlier items.
+
+**Files:** `frontend/src/components/MapView.vue` (state/watcher/routing/
+filter/reset/force-off split into `showMineholes`+`showCaves` pairs
+throughout, mirroring the same locations item 16 touched; Map row
+template/CSS; a wrapping `<div @click>` around label+spacer+chevron on
+all four expandable sections)
+
+**How it works:** The Mineholes/Caves split is a mechanical duplication
+of every place item 16 touched (watcher, both `applyOverlayMap` branches,
+`changeMap`, the `updateMarkers` routing push and visibility ternary,
+reset, force-off) -- same structure as the Vortexes pattern, just twice.
+The click-to-expand fix wraps `<span>Label</span><v-spacer/><v-icon
+chevron></v-icon>` in a `<div style="flex-grow:1;cursor:pointer"
+@click="...Expanded = !...Expanded">`, moving the click handler off the
+tiny icon and onto that whole flex region -- deliberately stops short of
+the `.row-icons` eye-toggle gutter on the left, so clicking the
+visibility icon still only toggles visibility, not both.
+
+**Potential complications:**
+- Verified live: turning Mineholes off while Caves stayed on removed
+  exactly the 5 mineholes from the map and left all 6 caves showing
+  (independent state, not coupled); clicking the "Natural Resources" text
+  itself (not the chevron) toggled `naturalMarkersExpanded` from false to
+  true; the Map row's label now left-aligns at the same x-position
+  (69px) as every other row, with the border still present and 10px
+  margin confirmed via computed style.
+
+## 18. Map row sizing polish; only Thingwalls/Vortexes visible by default
+
+**What it does:** Two more small fixes. (1) The "Map" section header's
+label is 2px larger (13px to 15px) and the row gets 6px of padding above
+and below its content, so the top/bottom border lines (item 17) don't sit
+flush against the text -- it was reading as squished. (2) On a fresh page
+load, only Thingwalls and Vortexes are visible by default; every other
+marker-visibility toggle (Natural Resources, Mineholes, Caves, Quest
+Givers, Players, Roads, Custom Markers) now starts off, left for the
+user to turn on. Name/tooltip preferences (Quest/Thingwall/Player names)
+are untouched by this -- those are a separate "how it's labeled" setting
+from "is it shown at all," and don't matter until their section's eye is
+turned on anyway.
+
+**Files:** `frontend/src/components/MapView.vue` (Map row inline style,
+`show*` defaults in `data()`)
+
+**How it works:** The padding fix needed `!important` on the inline
+style -- a global `.v-list-item { padding: 0px !important; }` rule
+elsewhere in this file was silently winning over a plain inline
+`padding-top/bottom` without it. The visibility defaults are a pure
+`data()` change; none of these are persisted server-side (unlike e.g.
+Players Names in /settings), so every account gets the same fresh-load
+defaults.
+
+**Potential complications:**
+- Verified live: computed padding on the Map row is now `6px/6px`
+  (previously silently `0px/0px` despite the inline style being present
+  in the DOM, confirming the `!important` conflict), row height grew from
+  18px to 38px; on a fresh page load `showThingwalls`/`showVortexes` are
+  `true` and every other visibility toggle (`showMarkers`, `showQuests`,
+  `showPlayers`, `showRoads`, `showCustomMarkers`, `showClutter`,
+  `showMineholes`, `showCaves`, `showUnknownMarkers`,
+  `showGridCoordinates`) reads `false`.
+
+## 19. Map label repositioned to align with the show/hide-names icon column
+
+**What it does:** "Map"'s label now starts one icon-width in from the
+row's left edge (aligned with where a two-icon row's second icon --
+e.g. Thingwalls' show/hide-names toggle -- sits) instead of the full
+64px `.row-icons` width every other section's label starts at.
+
+**Why:** Directly requested -- the Map row has no eye toggle of its own,
+so the standard 64px gutter left it looking mis-aligned relative to
+the rows around it; a narrower 32px gutter positions it against the
+second icon column instead.
+
+**Files:** `frontend/src/components/MapView.vue` (Map row's leading
+spacer div, `width:32px` instead of the shared `.row-icons` class)
+
+**How it works:** A plain `width:32px` div (not the `.row-icons` class,
+which is fixed at 64px for two icons) replaces the empty gutter used in
+item 17.
+
+**Potential complications:**
+- Verified live: the Map label and Thingwalls' show/hide-names icon
+  both measure `left: 37px` -- exact pixel alignment, not approximate.
