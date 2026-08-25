@@ -7,6 +7,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"image"
+	"image/draw"
+	"image/jpeg"
+	"image/png"
 	"io"
 	"log"
 	"net/http"
@@ -1324,25 +1328,39 @@ func (m *Map) adminMap(rw http.ResponseWriter, req *http.Request) {
 		return
 	}
 	mi := MapInfo{}
+	gridCount := 0
 	m.db.View(func(tx *bbolt.Tx) error {
 		mapB := tx.Bucket([]byte("maps"))
-		if mapB == nil {
-			return nil
+		if mapB != nil {
+			mraw := mapB.Get([]byte(strconv.Itoa(mapid)))
+			json.Unmarshal(mraw, &mi)
 		}
-		mraw := mapB.Get([]byte(strconv.Itoa(mapid)))
-		return json.Unmarshal(mraw, &mi)
+		if grids := tx.Bucket([]byte("grids")); grids != nil {
+			grids.ForEach(func(k, v []byte) error {
+				gd := GridData{}
+				if json.Unmarshal(v, &gd) == nil && gd.Map == mapid {
+					gridCount++
+				}
+				return nil
+			})
+		}
+		return nil
 	})
 
 	m.ExecuteTemplate(rw, filepath.FromSlash("admin/map.tmpl"), struct {
-		Page        Page
-		Session     *Session
-		MapInfo     MapInfo
-		TierOptions []TierOption
+		Page            Page
+		Session         *Session
+		MapInfo         MapInfo
+		TierOptions     []TierOption
+		ShowPreview     bool
+		MaxPreviewGrids int
 	}{
-		Page:        m.getPage(req),
-		Session:     s,
-		MapInfo:     mi,
-		TierOptions: tierOptions,
+		Page:            m.getPage(req),
+		Session:         s,
+		MapInfo:         mi,
+		TierOptions:     tierOptions,
+		ShowPreview:     gridCount > 0 && gridCount <= maxSpawnZoneGrids,
+		MaxPreviewGrids: maxSpawnZoneGrids,
 	})
 }
 
@@ -1653,14 +1671,40 @@ func (m *Map) findMapsWithoutEntry() ([]MapInfo, error) {
 	return result, nil
 }
 
+// findConfirmedSpawnZones compares every small candidate map directly
+// against the known-good embedded reference (spawnref.go), independent
+// of whether it also matches any other map in findDuplicateMaps' peer
+// clustering. This is what catches a spawn zone that happens to be the
+// only instance of its particular seed currently in the data -- without
+// a peer to cluster with, it would otherwise only ever land in the
+// weaker no-entrance-marker bucket.
+func (m *Map) findConfirmedSpawnZones() ([]MapInfo, error) {
+	if len(spawnReferenceTileSet) == 0 {
+		return nil, nil // reference failed to load -- degrade quietly, other signals still work
+	}
+	_, candidates, mapInfos, err := m.findSmallMapCandidates()
+	if err != nil {
+		return nil, err
+	}
+	result := []MapInfo{}
+	for mapid, entries := range candidates {
+		if tileSetSimilarity(m.buildTileSet(entries), spawnReferenceTileSet) >= layoutSimilarityThreshold {
+			result = append(result, mapInfos[mapid])
+		}
+	}
+	sort.Slice(result, func(i, j int) bool { return result[i].ID < result[j].ID })
+	return result, nil
+}
+
 // layoutSimilarityThreshold is how much of two maps' tiles have to line
 // up (same relative position, same tile-image content hash) for them to
-// count as the same template. Started at an exact 100% match, but a
-// single client-side rendering difference (lighting, foliage frame)
-// between two otherwise-identical spawn instances would silently break
-// that -- 90% tolerates a handful of mismatched tiles while still
-// requiring the layouts to be genuinely the same shape.
-const layoutSimilarityThreshold = 0.90
+// count as the same template. Started at an exact 100% match, raised to
+// 90% (item 24) since a single rendering difference between two
+// otherwise-identical spawn instances would silently break an exact
+// match; now at 75% to see how much further loosening it catches
+// without losing precision -- lower this further only if it's still
+// missing real duplicates without also pulling in unrelated maps.
+const layoutSimilarityThreshold = 0.75
 
 // mapTileSet is a map's grids normalized to (relative x, relative y) ->
 // tile content hash, relative to that map's own bounding box so the
@@ -1807,6 +1851,12 @@ func (m *Map) adminDuplicateMaps(rw http.ResponseWriter, req *http.Request) {
 		http.Redirect(rw, req, "/", 302)
 		return
 	}
+	confirmed, err := m.findConfirmedSpawnZones()
+	if err != nil {
+		log.Println(err)
+		http.Error(rw, "internal error", http.StatusInternalServerError)
+		return
+	}
 	groups, err := m.findDuplicateMaps()
 	if err != nil {
 		log.Println(err)
@@ -1819,31 +1869,168 @@ func (m *Map) adminDuplicateMaps(rw http.ResponseWriter, req *http.Request) {
 		http.Error(rw, "internal error", http.StatusInternalServerError)
 		return
 	}
-	// Solo is the no-entry list minus anything already shown in a
-	// template-match group above -- keeps this one combined report
-	// instead of listing the same map twice under two headings.
-	inGroup := map[int]bool{}
+
+	isConfirmed := map[int]bool{}
+	for _, mi := range confirmed {
+		isConfirmed[mi.ID] = true
+	}
+
+	// A map matched against the known reference is reported there and
+	// nowhere else -- filter it out of whichever peer-matched group it
+	// also landed in (dropping the group entirely if that leaves it
+	// with under 2 members) so the same map never appears twice.
+	filteredGroups := []DuplicateGroup{}
 	for _, g := range groups {
+		kept := g.Maps[:0]
+		for _, mi := range g.Maps {
+			if !isConfirmed[mi.ID] {
+				kept = append(kept, mi)
+			}
+		}
+		g.Maps = kept
+		if len(g.Maps) >= 2 {
+			filteredGroups = append(filteredGroups, g)
+		}
+	}
+
+	// Solo is the no-entry list minus anything already shown in a
+	// template-match group above or the confirmed-spawn list -- keeps
+	// this one combined report instead of listing the same map twice.
+	inGroup := map[int]bool{}
+	for _, g := range filteredGroups {
 		for _, mi := range g.Maps {
 			inGroup[mi.ID] = true
 		}
 	}
 	solo := []MapInfo{}
 	for _, mi := range noEntry {
-		if !inGroup[mi.ID] {
+		if !inGroup[mi.ID] && !isConfirmed[mi.ID] {
 			solo = append(solo, mi)
 		}
 	}
 	m.ExecuteTemplate(rw, filepath.FromSlash("admin/duplicates.tmpl"), struct {
-		Page    Page
-		Session *Session
-		Groups  []DuplicateGroup
-		Solo    []MapInfo
+		Page      Page
+		Session   *Session
+		Confirmed []MapInfo
+		Groups    []DuplicateGroup
+		Solo      []MapInfo
 	}{
-		Page:    m.getPage(req),
-		Session: s,
-		Groups:  groups,
-		Solo:    solo,
+		Page:      m.getPage(req),
+		Session:   s,
+		Confirmed: confirmed,
+		Groups:    filteredGroups,
+		Solo:      solo,
 	})
+}
+
+// stitchMap composites every grid tile a map has into one image, laid
+// out by each grid's relative position -- a flat "look at this whole
+// seed at once" view, separate from paging through the interactive
+// Leaflet map one grid at a time. Scoped to maxSpawnZoneGrids and below
+// only (same cutoff as the Duplicates report): this is for eyeballing
+// small candidate maps, not for ever attempting this on the overworld.
+func (m *Map) stitchMap(mapid int) (image.Image, error) {
+	var entries []struct {
+		id   string
+		x, y int
+	}
+	err := m.db.View(func(tx *bbolt.Tx) error {
+		grids := tx.Bucket([]byte("grids"))
+		if grids == nil {
+			return nil
+		}
+		return grids.ForEach(func(k, v []byte) error {
+			gd := GridData{}
+			if json.Unmarshal(v, &gd) == nil && gd.Map == mapid {
+				entries = append(entries, struct {
+					id   string
+					x, y int
+				}{id: gd.ID, x: gd.Coord.X, y: gd.Coord.Y})
+			}
+			return nil
+		})
+	})
+	if err != nil {
+		return nil, err
+	}
+	if len(entries) == 0 {
+		return nil, fmt.Errorf("map %d has no grids", mapid)
+	}
+	if len(entries) > maxSpawnZoneGrids {
+		return nil, fmt.Errorf("map %d has %d grids, over the %d-grid preview limit", mapid, len(entries), maxSpawnZoneGrids)
+	}
+
+	minX, minY, maxX, maxY := entries[0].x, entries[0].y, entries[0].x, entries[0].y
+	for _, e := range entries {
+		if e.x < minX {
+			minX = e.x
+		}
+		if e.y < minY {
+			minY = e.y
+		}
+		if e.x > maxX {
+			maxX = e.x
+		}
+		if e.y > maxY {
+			maxY = e.y
+		}
+	}
+
+	// Decode everything up front, both to find the real tile size before
+	// allocating the canvas (rather than guessing and risking a mismatch
+	// between early and late placements) and so a missing/corrupt file
+	// just leaves that cell blank instead of failing the whole preview.
+	tiles := map[string]image.Image{}
+	tileSize := 0
+	for _, e := range entries {
+		f, err := os.Open(filepath.Join(m.gridStorage, "grids", e.id+".png"))
+		if err != nil {
+			continue
+		}
+		tile, decErr := png.Decode(f)
+		f.Close()
+		if decErr != nil {
+			continue
+		}
+		tiles[e.id] = tile
+		if tileSize == 0 {
+			tileSize = tile.Bounds().Dx()
+		}
+	}
+	if tileSize == 0 {
+		return nil, fmt.Errorf("map %d has no readable tile images", mapid)
+	}
+
+	canvas := image.NewRGBA(image.Rect(0, 0, (maxX-minX+1)*tileSize, (maxY-minY+1)*tileSize))
+	for _, e := range entries {
+		tile, ok := tiles[e.id]
+		if !ok {
+			continue
+		}
+		dstX := (e.x - minX) * tileSize
+		dstY := (e.y - minY) * tileSize
+		draw.Draw(canvas, image.Rect(dstX, dstY, dstX+tileSize, dstY+tileSize), tile, image.Point{}, draw.Src)
+	}
+	return canvas, nil
+}
+
+func (m *Map) adminMapPreview(rw http.ResponseWriter, req *http.Request) {
+	s := m.getSession(req)
+	if s == nil || !s.Auths.Has(AUTH_ADMIN) {
+		http.Redirect(rw, req, "/", 302)
+		return
+	}
+	mapid, err := strconv.Atoi(req.FormValue("map"))
+	if err != nil {
+		http.Error(rw, "map parse failed", http.StatusBadRequest)
+		return
+	}
+	img, err := m.stitchMap(mapid)
+	if err != nil {
+		http.Error(rw, err.Error(), http.StatusBadRequest)
+		return
+	}
+	rw.Header().Set("Content-Type", "image/jpeg")
+	jpeg.Encode(rw, img, &jpeg.Options{Quality: 90})
 }
 

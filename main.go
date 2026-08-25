@@ -139,6 +139,7 @@ func main() {
 	http.HandleFunc("/admin/mapic", m.adminICMap)
 	http.HandleFunc("/admin/deleteMap", m.deleteMap)
 	http.HandleFunc("/admin/duplicateMaps", m.adminDuplicateMaps)
+	http.HandleFunc("/admin/mapPreview", m.adminMapPreview)
 
 	// Map frontend endpoints
 	http.HandleFunc("/map/api/v1/characters", m.getChars)

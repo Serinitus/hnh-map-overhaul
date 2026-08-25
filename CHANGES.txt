@@ -1153,3 +1153,27 @@ one group instead of two separate pairs.
   the scale tested (dozens of maps, each tile-set capped at 20 entries
   by `maxSpawnZoneGrids`), but worth knowing if an instance ever
   accumulates hundreds of small maps.
+
+## 25. Similarity threshold lowered to 75%; map preview stitching; embedded known-spawn-zone reference
+
+**What it does:** Three more additions on top of items 20-24.
+
+1. **Layout-match threshold lowered from 90% to 75%** (`layoutSimilarityThreshold`), to see how much further loosening it catches without pulling in unrelated maps -- lower this further only if it's still missing real duplicates.
+
+2. **Map preview stitching**: a map's Edit page now shows every one of its grid tiles composited into a single image, for maps at or under 20 grids. A quick "look at this whole seed at once" view instead of paging through the interactive Leaflet map one grid at a time.
+
+3. **Embedded known-spawn-zone reference**: a new "Confirmed" tier at the top of the Duplicates report, matching small maps directly against a known-good spawn-zone layout captured from a live character spawn and embedded in the binary at compile time. Unlike the peer-matching in item 22, this identifies a spawn zone even when it's the only instance of its particular seed currently in the data -- it doesn't need another map to match against.
+
+**Why:** All directly requested, in the course of validating item 22 against real, freshly-generated data (a live character spawn walked through during this session). The embedded reference specifically came out of watching that live spawn get flagged only because it happened to already have a peer match -- a genuinely unique spawn seed wouldn't have been caught as confidently, so a direct reference match closes that gap.
+
+**Files:** `admin.go` (`layoutSimilarityThreshold` now 0.75, `findConfirmedSpawnZones`, `stitchMap`, `adminMapPreview`, `adminMap` now computes `ShowPreview`/`MaxPreviewGrids`), `main.go` (route registrations), `templates/admin/map.tmpl` (Preview card), `templates/admin/duplicates.tmpl` (Confirmed section), `spawnref.go` (new -- loads the embedded reference at startup), `spawnref/tiles/*.png` + `spawnref/coords.json` (new -- the actual reference tile images and their coordinates)
+
+**How it works:**
+- **Preview stitching** (`stitchMap`) reads every grid a map has, computes its bounding box, decodes each tile PNG once up front (both to determine the real per-tile pixel size before allocating the canvas, rather than guessing and risking early/late placements disagreeing, and so one missing/corrupt file just leaves that cell blank instead of failing the whole image), then composites everything onto one `image.RGBA` canvas and serves it as JPEG. Capped at `maxSpawnZoneGrids`, same reasoning as the Duplicates report -- this is for eyeballing small candidates, never intended to run against the overworld.
+- **Embedded reference**: the 20 tile PNGs for a specific, confirmed-clean spawn instance (map 26 in this session's `reference-test-data`, chosen over its otherwise-identical pair map 25 specifically because it had no client-side rendering artifacts) were copied into `spawnref/tiles/`, with their relative coordinates recorded in `spawnref/coords.json`. `spawnref.go` uses `go:embed` to bundle both into the compiled binary, then at startup builds the same `{"relX,relY": tileHash}` shape `buildTileSet` produces for a real map -- same key format, and critically the same hash source (raw file bytes via `io.Copy`, not a decode/re-encode round trip, which would silently never match `buildTileSet`'s hashes for visually-identical tiles). `findConfirmedSpawnZones` then runs every small candidate map through the exact same `tileSetSimilarity` comparison against this fixed reference instead of against other candidates.
+- A map matched against the reference is filtered out of the peer-matched groups and the no-entry solo list wherever it would otherwise also appear (including dropping a peer-matched group entirely if removing a confirmed member leaves it under 2 maps), so nothing is ever listed twice across the report's four sections.
+
+**Potential complications:**
+- Verified live, immediately, against data generated during this exact session: with a live character standing in a freshly-created spawn zone (maps 25/26), the Confirmed section correctly flagged both -- and correctly did *not* claim a match for the other four already-confirmed spawn-zone clusters from earlier in the session (5+7, 6+11+13+14, 8+22+23, 12+15), since those are genuinely different seed variants than the one specific layout embedded as the reference. That's expected, not a gap -- the reference only vouches for the one template it was captured from.
+- The embedded reference is tied to whatever that one spawn instance's tiles looked like; if Haven & Hearth's spawn generation has more than a small handful of fixed variants (this session already found evidence of at least four distinct ones), a single embedded reference won't catch all of them on its own -- the peer-matching in item 22 is still what covers the others. Adding more embedded references for the other confirmed variants would be a natural next step if that turns out to matter in practice.
+- This bakes real (if small, 20-tile) game map images into the repository and compiled binary -- worth knowing if that's a concern for repo size or for what's considered acceptable to commit, though it's the storage approach explicitly chosen over a database-only alternative.

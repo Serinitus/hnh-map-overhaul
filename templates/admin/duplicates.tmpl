@@ -45,6 +45,19 @@
                 some legitimate small maps to show up here too, especially
                 in the lower-confidence section below.</p>
 
+            <h5><span class="confidence-high">&#9679;</span> Confirmed -- matches known spawn-zone reference</h5>
+            <p>Maps that match at least 90% of a known-good spawn zone
+                layout captured directly from a live character spawn.
+                Unlike the sections below, this catches a spawn zone even
+                if it's the only instance of its particular seed in the
+                data right now -- it doesn't need another map to match
+                against.</p>
+            {{if not .Confirmed}}
+            <p><i>None found.</i></p>
+            {{else}}
+            {{template "admin/duplicates.tmpl:maptable" .Confirmed}}
+            {{end}}
+
             <h5><span class="confidence-high">&#9679;</span> High confidence -- shared layout, no entrance marker</h5>
             <p>Maps that both match at least 90% of another map's tile
                 layout <i>and</i> have no Mineshaft/Cave marker on them --
