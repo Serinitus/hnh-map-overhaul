@@ -176,6 +176,12 @@ func (m *Map) getMaps(rw http.ResponseWriter, req *http.Request) {
 			}
 			mi := &MapInfo{}
 			json.Unmarshal(v, &mi)
+			// The bucket key is authoritative -- a record saved by an
+			// older, buggy admin handler could have an explicit
+			// stale/zero ID stored in it (see admin.go's adminMap for
+			// the fix), which would otherwise send the frontend's map
+			// switcher a wrong/colliding map ID.
+			mi.ID = mapid
 			if mi.Hidden {
 				return nil
 			}

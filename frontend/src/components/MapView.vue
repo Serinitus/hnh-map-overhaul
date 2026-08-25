@@ -4,8 +4,7 @@
       <img src="haven.jpg" height="36" style="border-radius:4px;object-fit:cover;margin-right:10px;"/>
       <span style="font-size:1.25rem;"><span style="color:#FF9800;">Haven</span><span style="color:#fff;">Map</span></span>
       <v-spacer></v-spacer>
-      <v-btn text href="/map" class="mr-2">Map</v-btn>
-      <v-btn v-if="!isPublic" text href="/" class="mr-4">Tokens</v-btn>
+      <v-btn text href="/?tokens" class="mr-4">Tokens</v-btn>
       <v-btn v-if="isPublic" text href="/login">
         Login
       </v-btn>
@@ -1103,7 +1102,10 @@ export default {
         this.maps.push(map);
       }
       this.maps.sort((a, b) => {
-        return a.size < b.size;
+        if (a.SortOrder !== b.SortOrder) {
+          return a.SortOrder - b.SortOrder;
+        }
+        return a.Name.localeCompare(b.Name);
       });
 
       // Update url on manual drag, zoom

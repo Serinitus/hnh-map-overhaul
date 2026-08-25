@@ -2,8 +2,6 @@ package main
 
 import (
 	"archive/zip"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -13,6 +11,7 @@ import (
 	"image/png"
 	"io"
 	"log"
+	"math"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -234,6 +233,7 @@ func (m *Map) adminPublic(rw http.ResponseWriter, req *http.Request) {
 		cfg := PublicConfig{
 			Enabled: req.FormValue("enabled") != "",
 			Auths:   req.Form["auths"],
+			Token:   req.FormValue("token"),
 		}
 		m.db.Update(func(tx *bbolt.Tx) error {
 			b, err := tx.CreateBucketIfNotExists([]byte("config"))
@@ -1268,6 +1268,11 @@ func (m *Map) adminICMap(rw http.ResponseWriter, req *http.Request) {
 		if rawmap != nil {
 			json.Unmarshal(rawmap, &mapinfo)
 		}
+		// The bucket key is authoritative regardless of what (if
+		// anything) was stored under it -- a map that's never had an
+		// explicit maps-bucket entry written before this point would
+		// otherwise get saved back with a zero ID.
+		mapinfo.ID = mapid
 		switch action {
 		case "toggle-hidden":
 			mapinfo.Hidden = !mapinfo.Hidden
@@ -1279,6 +1284,50 @@ func (m *Map) adminICMap(rw http.ResponseWriter, req *http.Request) {
 		}
 		return maps.Put([]byte(strconv.Itoa(mapid)), rawmap)
 	})
+}
+
+// setMapOrder is a quick inline editor for MapInfo.SortOrder, separate
+// from the full Edit-map form (adminMap below) so reordering several
+// maps from the main admin Maps table doesn't require opening each
+// one's Edit page individually.
+func (m *Map) setMapOrder(rw http.ResponseWriter, req *http.Request) {
+	s := m.getSession(req)
+	if s == nil || !s.Auths.Has(AUTH_ADMIN) {
+		http.Redirect(rw, req, "/", 302)
+		return
+	}
+	mapid, err := strconv.Atoi(req.FormValue("map"))
+	if err != nil {
+		http.Error(rw, "map parse failed", http.StatusBadRequest)
+		return
+	}
+	sortOrder, _ := strconv.Atoi(req.FormValue("sortOrder")) // empty/invalid just defaults to 0
+
+	err = m.db.Update(func(tx *bbolt.Tx) error {
+		maps, err := tx.CreateBucketIfNotExists([]byte("maps"))
+		if err != nil {
+			return err
+		}
+		rawmap := maps.Get([]byte(strconv.Itoa(mapid)))
+		mapinfo := MapInfo{}
+		if rawmap != nil {
+			json.Unmarshal(rawmap, &mapinfo)
+		}
+		mapinfo.ID = mapid // bucket key is authoritative, see adminICMap
+		mapinfo.SortOrder = sortOrder
+		rawmap, err = json.Marshal(mapinfo)
+		if err != nil {
+			return err
+		}
+		return maps.Put([]byte(strconv.Itoa(mapid)), rawmap)
+	})
+	if err != nil {
+		log.Println(err)
+		http.Error(rw, "internal error", http.StatusInternalServerError)
+		return
+	}
+
+	http.Redirect(rw, req, redirectTarget(req), 302)
 }
 
 func (m *Map) adminMap(rw http.ResponseWriter, req *http.Request) {
@@ -1302,6 +1351,7 @@ func (m *Map) adminMap(rw http.ResponseWriter, req *http.Request) {
 		hidden := !(req.FormValue("hidden") == "")
 		priority := !(req.FormValue("priority") == "")
 		requiredAuth := req.FormValue("requiredAuth")
+		sortOrder, _ := strconv.Atoi(req.FormValue("sortOrder")) // empty/invalid just defaults to 0
 
 		m.db.Update(func(tx *bbolt.Tx) error {
 			maps, err := tx.CreateBucketIfNotExists([]byte("maps"))
@@ -1313,10 +1363,12 @@ func (m *Map) adminMap(rw http.ResponseWriter, req *http.Request) {
 			if rawmap != nil {
 				json.Unmarshal(rawmap, &mapinfo)
 			}
+			mapinfo.ID = mapid // bucket key is authoritative, see adminICMap
 			mapinfo.Name = name
 			mapinfo.Hidden = hidden
 			mapinfo.Priority = priority
 			mapinfo.RequiredAuth = requiredAuth
+			mapinfo.SortOrder = sortOrder
 			rawmap, err = json.Marshal(mapinfo)
 			if err != nil {
 				return err
@@ -1335,6 +1387,12 @@ func (m *Map) adminMap(rw http.ResponseWriter, req *http.Request) {
 			mraw := mapB.Get([]byte(strconv.Itoa(mapid)))
 			json.Unmarshal(mraw, &mi)
 		}
+		// The bucket key is authoritative -- unconditionally re-applied
+		// after unmarshal (not just as a zero-value default) since a
+		// record saved by an older, buggy version of this handler could
+		// have an explicit stale/zero ID stored in it, which unmarshal
+		// would otherwise overwrite this with.
+		mi.ID = mapid
 		if grids := tx.Bucket([]byte("grids")); grids != nil {
 			grids.ForEach(func(k, v []byte) error {
 				gd := GridData{}
@@ -1369,21 +1427,26 @@ func (m *Map) adminMap(rw http.ResponseWriter, req *http.Request) {
 // toggle-hidden), which only stops it from being listed. Irreversible, no
 // backing up/soft-delete; mirrors the existing "Wipe all data" pattern
 // (see wipe() above) but scoped to one map instead of every map.
-func (m *Map) deleteMap(rw http.ResponseWriter, req *http.Request) {
-	s := m.getSession(req)
-	if s == nil || !s.Auths.Has(AUTH_ADMIN) {
-		http.Redirect(rw, req, "/", 302)
-		return
+// redirectTarget reads an optional "redirect" form value, falling back
+// to "/admin" -- lets a delete action send the admin back to whatever
+// page they deleted from (e.g. the Duplicates report) instead of
+// always bouncing to the main admin page. Only ever set by our own
+// templates, but validated anyway (must be an internal, single-slash
+// path) since it still flows through an http.Redirect.
+func redirectTarget(req *http.Request) string {
+	target := req.FormValue("redirect")
+	if target == "" || target[0] != '/' || (len(target) > 1 && target[1] == '/') {
+		return "/admin"
 	}
+	return target
+}
 
-	mapid, err := strconv.Atoi(req.FormValue("map"))
-	if err != nil {
-		http.Error(rw, "map parse failed", http.StatusBadRequest)
-		return
-	}
+// deleteMapTx runs the actual per-map deletion inside an existing
+// transaction, so deleteMap (one map) and deleteMaps (a batch) share
+// identical logic and deleteMaps can commit its whole batch atomically
+// instead of one transaction per map.
+func (m *Map) deleteMapTx(tx *bbolt.Tx, mapid int) error {
 	mapKey := []byte(strconv.Itoa(mapid))
-
-	err = m.db.Update(func(tx *bbolt.Tx) error {
 		// Grids: flat bucket keyed by grid ID, each value carrying which
 		// map it belongs to -- collect the grid IDs for this map first,
 		// both to delete them and because markers below are keyed by
@@ -1484,11 +1547,34 @@ func (m *Map) deleteMap(rw http.ResponseWriter, req *http.Request) {
 			}
 		}
 
-		maps, err := tx.CreateBucketIfNotExists([]byte("maps"))
-		if err != nil {
-			return err
-		}
-		return maps.Delete(mapKey)
+	maps, err := tx.CreateBucketIfNotExists([]byte("maps"))
+	if err != nil {
+		return err
+	}
+	return maps.Delete(mapKey)
+}
+
+// deleteMap permanently removes one map layer and everything scoped to
+// it -- grids, tiles, markers, roads, and custom markers -- unlike Hide
+// (map.go's toggle-hidden), which only stops it from being listed.
+// Irreversible, no backing up/soft-delete; mirrors the existing "Wipe
+// all data" pattern (see wipe() above) but scoped to one map instead of
+// every map.
+func (m *Map) deleteMap(rw http.ResponseWriter, req *http.Request) {
+	s := m.getSession(req)
+	if s == nil || !s.Auths.Has(AUTH_ADMIN) {
+		http.Redirect(rw, req, "/", 302)
+		return
+	}
+
+	mapid, err := strconv.Atoi(req.FormValue("map"))
+	if err != nil {
+		http.Error(rw, "map parse failed", http.StatusBadRequest)
+		return
+	}
+
+	err = m.db.Update(func(tx *bbolt.Tx) error {
+		return m.deleteMapTx(tx, mapid)
 	})
 	if err != nil {
 		log.Println(err)
@@ -1496,7 +1582,50 @@ func (m *Map) deleteMap(rw http.ResponseWriter, req *http.Request) {
 		return
 	}
 
-	http.Redirect(rw, req, "/admin", 302)
+	http.Redirect(rw, req, redirectTarget(req), 302)
+}
+
+// deleteMaps is the checkbox-driven bulk version of deleteMap -- lets
+// an admin select several flagged maps in the Duplicates report and
+// remove them in one action instead of one page reload per map. Same
+// deletion logic as deleteMap, just looped inside a single transaction
+// so the whole batch commits atomically.
+func (m *Map) deleteMaps(rw http.ResponseWriter, req *http.Request) {
+	s := m.getSession(req)
+	if s == nil || !s.Auths.Has(AUTH_ADMIN) {
+		http.Redirect(rw, req, "/", 302)
+		return
+	}
+	if err := req.ParseForm(); err != nil {
+		http.Error(rw, "form parse failed", http.StatusBadRequest)
+		return
+	}
+
+	var mapids []int
+	for _, raw := range req.Form["map"] {
+		mapid, err := strconv.Atoi(raw)
+		if err != nil {
+			http.Error(rw, "map parse failed", http.StatusBadRequest)
+			return
+		}
+		mapids = append(mapids, mapid)
+	}
+
+	err := m.db.Update(func(tx *bbolt.Tx) error {
+		for _, mapid := range mapids {
+			if err := m.deleteMapTx(tx, mapid); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		log.Println(err)
+		http.Error(rw, "internal error", http.StatusInternalServerError)
+		return
+	}
+
+	http.Redirect(rw, req, redirectTarget(req), 302)
 }
 
 // DuplicateGroup is a set of maps that appear to be the same templated
@@ -1596,6 +1725,7 @@ func (m *Map) findSmallMapCandidates() (gridCounts map[int]int, candidates map[i
 				if raw != nil {
 					json.Unmarshal(raw, &mi)
 				}
+				mi.ID = mapid // bucket key is authoritative, see adminMap
 				mapInfos[mapid] = mi
 			}
 		}
@@ -1671,6 +1801,121 @@ func (m *Map) findMapsWithoutEntry() ([]MapInfo, error) {
 	return result, nil
 }
 
+// darkPixelValue is the per-channel cutoff (out of 255) below which a
+// pixel counts as "dark" for tileDarkFraction -- generous enough to
+// still catch a tile even with minor rendering noise, since the actual
+// void color observed in real data is pure black (0,0,0).
+const darkPixelValue = 30
+
+// darkTileThreshold is how much of a single tile's pixels need to be
+// dark for the tile itself to count as a "dark tile".
+const darkTileThreshold = 0.9
+
+// darkMapThreshold is how much of a map's own tiles need to be dark
+// tiles for the whole map to be flagged as a likely dungeon/house
+// interior instead of open terrain.
+const darkMapThreshold = 0.9
+
+// pureBlackThreshold is how dark a single tile needs to be to count as
+// having literally zero rendered content, vs. darkTileThreshold's
+// looser bar for "dark enough to count toward the map being an
+// interior at all". Distinguishes two real, differently-actionable
+// cases confirmed against live data: player-built structures (houses,
+// stonesteads) have no in-game minimap at all, so every one of their
+// tiles measures exactly 100% dark with zero exceptions; real dungeon
+// and basement instances do have a rendered minimap, so at least one
+// of their tiles always has a sliver of non-black content (a corridor
+// or wall line) even when the map is otherwise almost entirely black.
+const pureBlackThreshold = 0.999
+
+// tileDarkFraction is the fraction of a tile image's pixels that are
+// near-black.
+func tileDarkFraction(img image.Image) float64 {
+	b := img.Bounds()
+	total := 0
+	dark := 0
+	for y := b.Min.Y; y < b.Max.Y; y++ {
+		for x := b.Min.X; x < b.Max.X; x++ {
+			r, g, bl, _ := img.At(x, y).RGBA()
+			total++
+			if r>>8 < darkPixelValue && g>>8 < darkPixelValue && bl>>8 < darkPixelValue {
+				dark++
+			}
+		}
+	}
+	if total == 0 {
+		return 0
+	}
+	return float64(dark) / float64(total)
+}
+
+// findInteriorMaps flags small candidate maps that are almost entirely
+// black -- dungeon and house interiors render on a black background
+// outside their own geometry, unlike open-world terrain (spawn zones,
+// caves) which is mostly grass/rock with black only at the unexplored
+// edges of what's been walked. This is deliberately not trying to
+// match specific interior templates against each other the way
+// findDuplicateMaps does for spawn zones -- real data showed interior
+// content (thin corridor/wall lines) is too sparse per-tile for the
+// same coarse landmark classification to pick up reliably. Instead
+// every interior gets flagged for manual review, split into two
+// buckets by whether any real content actually rendered (see
+// pureBlackThreshold): noRender for player structures (nothing to see,
+// confirmed against real houses/stonesteads -- a much stronger signal
+// that these are safe to review for deletion), partial for real
+// dungeon/basement instances that did capture some minimap content.
+func (m *Map) findInteriorMaps() (noRender []MapInfo, partial []MapInfo, err error) {
+	_, candidates, mapInfos, ferr := m.findSmallMapCandidates()
+	if ferr != nil {
+		return nil, nil, ferr
+	}
+	for mapid, entries := range candidates {
+		decoded := 0
+		darkTiles := 0
+		pureBlackTiles := 0
+		for _, e := range entries {
+			f, oerr := os.Open(filepath.Join(m.gridStorage, "grids", e.id+".png"))
+			if oerr != nil {
+				// A grid this map thinks it has, but whose tile image is
+				// missing on disk. Left out of decoded entirely (not just
+				// skipped for the dark count) -- otherwise a map that's
+				// missing a few tile files gets its dark fraction unfairly
+				// dragged down by files that were never actually there to
+				// judge, even when every tile that *is* present is 100%
+				// dark (real case: map 33, 9 registered grids but only 6
+				// tile files on disk -- all 6 fully dark, but dividing by
+				// 9 instead of 6 put it under darkMapThreshold and hid it
+				// from this report entirely).
+				continue
+			}
+			img, _, derr := image.Decode(f)
+			f.Close()
+			if derr != nil {
+				continue
+			}
+			decoded++
+			df := tileDarkFraction(img)
+			if df >= darkTileThreshold {
+				darkTiles++
+			}
+			if df >= pureBlackThreshold {
+				pureBlackTiles++
+			}
+		}
+		if decoded == 0 || float64(darkTiles)/float64(decoded) < darkMapThreshold {
+			continue
+		}
+		if pureBlackTiles == decoded {
+			noRender = append(noRender, mapInfos[mapid])
+		} else {
+			partial = append(partial, mapInfos[mapid])
+		}
+	}
+	sort.Slice(noRender, func(i, j int) bool { return noRender[i].ID < noRender[j].ID })
+	sort.Slice(partial, func(i, j int) bool { return partial[i].ID < partial[j].ID })
+	return noRender, partial, nil
+}
+
 // findConfirmedSpawnZones compares every small candidate map directly
 // against the known-good embedded reference (spawnref.go), independent
 // of whether it also matches any other map in findDuplicateMaps' peer
@@ -1679,7 +1924,7 @@ func (m *Map) findMapsWithoutEntry() ([]MapInfo, error) {
 // a peer to cluster with, it would otherwise only ever land in the
 // weaker no-entrance-marker bucket.
 func (m *Map) findConfirmedSpawnZones() ([]MapInfo, error) {
-	if len(spawnReferenceTileSet) == 0 {
+	if len(spawnReferenceLandmarks) == 0 {
 		return nil, nil // reference failed to load -- degrade quietly, other signals still work
 	}
 	_, candidates, mapInfos, err := m.findSmallMapCandidates()
@@ -1688,7 +1933,7 @@ func (m *Map) findConfirmedSpawnZones() ([]MapInfo, error) {
 	}
 	result := []MapInfo{}
 	for mapid, entries := range candidates {
-		if tileSetSimilarity(m.buildTileSet(entries), spawnReferenceTileSet) >= layoutSimilarityThreshold {
+		if landmarkSetSimilarity(m.buildLandmarkTiles(entries), spawnReferenceLandmarks) >= layoutSimilarityThreshold {
 			result = append(result, mapInfos[mapid])
 		}
 	}
@@ -1696,76 +1941,227 @@ func (m *Map) findConfirmedSpawnZones() ([]MapInfo, error) {
 	return result, nil
 }
 
-// layoutSimilarityThreshold is how much of two maps' tiles have to line
-// up (same relative position, same tile-image content hash) for them to
-// count as the same template. Started at an exact 100% match, raised to
-// 90% (item 24) since a single rendering difference between two
-// otherwise-identical spawn instances would silently break an exact
-// match; now at 75% to see how much further loosening it catches
-// without losing precision -- lower this further only if it's still
-// missing real duplicates without also pulling in unrelated maps.
+// layoutSimilarityThreshold is how much of two maps' landmark tiles
+// have to match for them to count as the same template. Started as an
+// exact content-hash match, raised to 90% (item 24) then 75% (item 25)
+// to tolerate rendering differences between otherwise-identical spawn
+// instances -- but even at 75%, exact-byte comparison still missed
+// obviously-identical spawn zones (e.g. two real captures of the same
+// template scored 0%). Real ground truth showed why: Haven & Hearth
+// re-rolls each grass tile's texture variant per capture, so the
+// background pixels of an otherwise-identical tile never hash the
+// same twice. Comparing raw bytes (or raw pixels) can't see past that
+// noise. See buildLandmarkTiles/tileSignature for the fix.
 const layoutSimilarityThreshold = 0.75
 
-// mapTileSet is a map's grids normalized to (relative x, relative y) ->
-// tile content hash, relative to that map's own bounding box so the
-// same template matches regardless of which absolute coordinates the
-// mapper assigned it.
-func (m *Map) buildTileSet(entries []struct {
-	id   string
-	x, y int
-}) map[string]string {
-	minX, minY := entries[0].x, entries[0].y
-	for _, e := range entries {
-		if e.x < minX {
-			minX = e.x
-		}
-		if e.y < minY {
-			minY = e.y
+// entryMarkerSimilarityThreshold applies instead of
+// layoutSimilarityThreshold whenever either map in a pair has a cave,
+// minehole, or ladder marker on it. Spawn zones never have one of these
+// markers, so 75% is fine there -- but real cave/mine layers regularly
+// share a lot of generic unmined-cave terrain with each other while
+// still being genuinely different digs, so a looser threshold produces
+// misleading transitive groupings: e.g. maps 3, 19, and 24 (all
+// entry-marked) landed in one group at 75% even though 19 and 24 only
+// matched each other at 33%; map 3 alone bridged them by separately
+// scoring 80% against both. 90% keeps that kind of coincidental
+// partial overlap from chaining unrelated maps together.
+const entryMarkerSimilarityThreshold = 0.90
+
+// sigCells is the side length of the coarse classification grid each
+// tile gets downsampled to (sigCells x sigCells cells).
+const sigCells = 10
+
+// minLandmarkCells is how many non-grass cells a tile's signature needs
+// before it's treated as a landmark worth matching on. Below this it's
+// close enough to a plain grass tile that comparing it to anything is
+// noise, not signal.
+const minLandmarkCells = 5
+
+// tileMatchThreshold is how similar two tiles' signatures need to be
+// (see tileSimilarity) to count as the same landmark.
+const tileMatchThreshold = 0.6
+
+type landmarkTile struct {
+	ID  string
+	Sig []byte
+}
+
+// classifyPixel buckets a pixel by hue/saturation/value rather than raw
+// RGB, so grass-texture-variant dithering within one terrain type still
+// lands in the same bucket: 'K' black/unexplored, 'N' neutral/low-sat,
+// 'G' green (grass/foliage), 'W' blue (water), 'O' orange/brown (dirt,
+// roads, cave-in circles), 'R' red, 'X' anything else.
+func classifyPixel(r, g, b uint8) byte {
+	rf, gf, bf := float64(r)/255, float64(g)/255, float64(b)/255
+	max := math.Max(rf, math.Max(gf, bf))
+	min := math.Min(rf, math.Min(gf, bf))
+	v := max
+	var s float64
+	if max > 0 {
+		s = (max - min) / max
+	}
+	if v < 0.12 {
+		return 'K'
+	}
+	if s < 0.15 {
+		return 'N'
+	}
+	var h float64
+	d := max - min
+	switch max {
+	case rf:
+		h = math.Mod((gf-bf)/d, 6)
+	case gf:
+		h = (bf-rf)/d + 2
+	case bf:
+		h = (rf-gf)/d + 4
+	}
+	h *= 60
+	if h < 0 {
+		h += 360
+	}
+	switch {
+	case h >= 85 && h <= 170:
+		return 'G'
+	case h >= 180 && h <= 260:
+		return 'W'
+	case h >= 15 && h < 55:
+		return 'O'
+	case h < 15 || h >= 340:
+		return 'R'
+	default:
+		return 'X'
+	}
+}
+
+// tileSignature downsamples a tile image into a sigCells x sigCells
+// grid, classifying each cell by its majority pixel bucket -- a coarse,
+// texture-noise-tolerant fingerprint of the tile's actual terrain
+// features (river bends, lake shapes, dirt circles) instead of its raw
+// pixel content.
+func tileSignature(img image.Image) []byte {
+	b := img.Bounds()
+	w, h := b.Dx(), b.Dy()
+	cw, ch := w/sigCells, h/sigCells
+	sig := make([]byte, sigCells*sigCells)
+	for cy := 0; cy < sigCells; cy++ {
+		for cx := 0; cx < sigCells; cx++ {
+			counts := map[byte]int{}
+			for y := cy * ch; y < (cy+1)*ch; y++ {
+				for x := cx * cw; x < (cx+1)*cw; x++ {
+					r, g, bl, _ := img.At(b.Min.X+x, b.Min.Y+y).RGBA()
+					counts[classifyPixel(byte(r>>8), byte(g>>8), byte(bl>>8))]++
+				}
+			}
+			var best byte
+			bestN := -1
+			for c, n := range counts {
+				if n > bestN {
+					best, bestN = c, n
+				}
+			}
+			sig[cy*sigCells+cx] = best
 		}
 	}
-	tiles := map[string]string{}
+	return sig
+}
+
+func isSignalClass(c byte) bool {
+	return c != 'G' && c != 'K' && c != 'N'
+}
+
+func nonGrassCount(sig []byte) int {
+	n := 0
+	for _, c := range sig {
+		if isSignalClass(c) {
+			n++
+		}
+	}
+	return n
+}
+
+// tileSimilarity compares two tile signatures over the union of cells
+// where either one has a non-grass classification -- two tiles that
+// both happen to be plain grass in a given cell neither helps nor hurts
+// the score, since that agreement carries no identifying information.
+func tileSimilarity(a, b []byte) float64 {
+	union := 0
+	matches := 0
+	for i := range a {
+		if isSignalClass(a[i]) || isSignalClass(b[i]) {
+			union++
+			if a[i] == b[i] {
+				matches++
+			}
+		}
+	}
+	if union == 0 {
+		return 0
+	}
+	return float64(matches) / float64(union)
+}
+
+// buildLandmarkTiles decodes every tile a map has and keeps only the
+// ones with enough non-grass content to be worth matching on (see
+// minLandmarkCells) -- deliberately position-independent, same
+// reasoning as the content-hash approach it replaced: two captures of
+// the same spawn zone can cover different subsets of it, so matching
+// by coordinate is fragile. Matching by which distinctive terrain
+// features (rivers, lakes, dirt circles) a map contains, regardless of
+// where the mapper placed them on the grid, is not.
+func (m *Map) buildLandmarkTiles(entries []struct {
+	id   string
+	x, y int
+}) []landmarkTile {
+	var tiles []landmarkTile
 	for _, e := range entries {
 		f, err := os.Open(filepath.Join(m.gridStorage, "grids", e.id+".png"))
 		if err != nil {
-			// A grid this map thinks it has, but whose tile image is
-			// missing on disk -- skip that one tile rather than failing
-			// this map's whole comparison (and definitely rather than
-			// crashing the report over one bad file).
 			continue
 		}
-		h := sha256.New()
-		_, copyErr := io.Copy(h, f)
+		img, _, err := image.Decode(f)
 		f.Close()
-		if copyErr != nil {
+		if err != nil {
 			continue
 		}
-		key := fmt.Sprintf("%d,%d", e.x-minX, e.y-minY)
-		tiles[key] = hex.EncodeToString(h.Sum(nil))
+		sig := tileSignature(img)
+		if nonGrassCount(sig) >= minLandmarkCells {
+			tiles = append(tiles, landmarkTile{ID: e.id, Sig: sig})
+		}
 	}
 	return tiles
 }
 
-// tileSetSimilarity is the fraction of (position, tile-hash) pairs the
-// two sets agree on, out of every position either one has -- so it
-// penalizes both mismatched tile content at a shared position and a
-// differently-shaped map (extra/missing positions), not just one or
-// the other.
-func tileSetSimilarity(a, b map[string]string) float64 {
-	union := map[string]bool{}
-	matches := 0
-	for pos, hashA := range a {
-		union[pos] = true
-		if hashB, ok := b[pos]; ok && hashB == hashA {
-			matches++
+// landmarkSetSimilarity greedily one-to-one matches each landmark tile
+// in a to its best-scoring not-yet-used counterpart in b (via
+// tileSimilarity), then reports the Dice coefficient of matched pairs
+// over both sets' total landmark counts -- tolerant of one map simply
+// having captured a couple more/fewer landmark tiles than the other.
+func landmarkSetSimilarity(a, b []landmarkTile) float64 {
+	used := make([]bool, len(b))
+	matched := 0
+	for _, ta := range a {
+		best := -1
+		bestSim := 0.0
+		for bi, tb := range b {
+			if used[bi] {
+				continue
+			}
+			if sim := tileSimilarity(ta.Sig, tb.Sig); sim > bestSim {
+				bestSim = sim
+				best = bi
+			}
+		}
+		if best >= 0 && bestSim >= tileMatchThreshold {
+			used[best] = true
+			matched++
 		}
 	}
-	for pos := range b {
-		union[pos] = true
-	}
-	if len(union) == 0 {
+	denom := len(a) + len(b)
+	if denom == 0 {
 		return 0
 	}
-	return float64(matches) / float64(len(union))
+	return 2 * float64(matched) / float64(denom)
 }
 
 func (m *Map) findDuplicateMaps() ([]DuplicateGroup, error) {
@@ -1779,10 +2175,10 @@ func (m *Map) findDuplicateMaps() ([]DuplicateGroup, error) {
 	}
 
 	mapids := make([]int, 0, len(candidates))
-	tileSets := map[int]map[string]string{}
+	tileSets := map[int][]landmarkTile{}
 	for mapid, entries := range candidates {
 		mapids = append(mapids, mapid)
-		tileSets[mapid] = m.buildTileSet(entries)
+		tileSets[mapid] = m.buildLandmarkTiles(entries)
 	}
 	sort.Ints(mapids)
 
@@ -1808,7 +2204,11 @@ func (m *Map) findDuplicateMaps() ([]DuplicateGroup, error) {
 	}
 	for i := 0; i < len(mapids); i++ {
 		for j := i + 1; j < len(mapids); j++ {
-			if tileSetSimilarity(tileSets[mapids[i]], tileSets[mapids[j]]) >= layoutSimilarityThreshold {
+			threshold := layoutSimilarityThreshold
+			if hasEntry[mapids[i]] || hasEntry[mapids[j]] {
+				threshold = entryMarkerSimilarityThreshold
+			}
+			if landmarkSetSimilarity(tileSets[mapids[i]], tileSets[mapids[j]]) >= threshold {
 				union(mapids[i], mapids[j])
 			}
 		}
@@ -1851,12 +2251,6 @@ func (m *Map) adminDuplicateMaps(rw http.ResponseWriter, req *http.Request) {
 		http.Redirect(rw, req, "/", 302)
 		return
 	}
-	confirmed, err := m.findConfirmedSpawnZones()
-	if err != nil {
-		log.Println(err)
-		http.Error(rw, "internal error", http.StatusInternalServerError)
-		return
-	}
 	groups, err := m.findDuplicateMaps()
 	if err != nil {
 		log.Println(err)
@@ -1869,58 +2263,259 @@ func (m *Map) adminDuplicateMaps(rw http.ResponseWriter, req *http.Request) {
 		http.Error(rw, "internal error", http.StatusInternalServerError)
 		return
 	}
-
-	isConfirmed := map[int]bool{}
-	for _, mi := range confirmed {
-		isConfirmed[mi.ID] = true
+	interiorsNoRender, interiorsPartial, err := m.findInteriorMaps()
+	if err != nil {
+		log.Println(err)
+		http.Error(rw, "internal error", http.StatusInternalServerError)
+		return
 	}
 
-	// A map matched against the known reference is reported there and
-	// nowhere else -- filter it out of whichever peer-matched group it
-	// also landed in (dropping the group entirely if that leaves it
-	// with under 2 members) so the same map never appears twice.
+	// A map already flagged as a likely interior gets shown once, in
+	// its own section, instead of also potentially showing up in a
+	// template-match group or the no-entry solo list below.
+	isInterior := map[int]bool{}
+	for _, mi := range interiorsNoRender {
+		isInterior[mi.ID] = true
+	}
+	for _, mi := range interiorsPartial {
+		isInterior[mi.ID] = true
+	}
 	filteredGroups := []DuplicateGroup{}
 	for _, g := range groups {
-		kept := g.Maps[:0]
+		kept := []MapInfo{}
 		for _, mi := range g.Maps {
-			if !isConfirmed[mi.ID] {
+			if !isInterior[mi.ID] {
 				kept = append(kept, mi)
 			}
 		}
-		g.Maps = kept
-		if len(g.Maps) >= 2 {
+		if len(kept) >= 2 {
+			g.Maps = kept
 			filteredGroups = append(filteredGroups, g)
 		}
 	}
+	groups = filteredGroups
 
 	// Solo is the no-entry list minus anything already shown in a
-	// template-match group above or the confirmed-spawn list -- keeps
+	// template-match group above or the interiors section -- keeps
 	// this one combined report instead of listing the same map twice.
 	inGroup := map[int]bool{}
-	for _, g := range filteredGroups {
+	for _, g := range groups {
 		for _, mi := range g.Maps {
 			inGroup[mi.ID] = true
 		}
 	}
 	solo := []MapInfo{}
 	for _, mi := range noEntry {
-		if !inGroup[mi.ID] && !isConfirmed[mi.ID] {
+		if !inGroup[mi.ID] && !isInterior[mi.ID] {
 			solo = append(solo, mi)
 		}
 	}
 	m.ExecuteTemplate(rw, filepath.FromSlash("admin/duplicates.tmpl"), struct {
-		Page      Page
-		Session   *Session
-		Confirmed []MapInfo
-		Groups    []DuplicateGroup
-		Solo      []MapInfo
+		Page              Page
+		Session           *Session
+		Groups            []DuplicateGroup
+		Solo              []MapInfo
+		InteriorsNoRender []MapInfo
+		InteriorsPartial  []MapInfo
+		ThresholdPct      int
 	}{
-		Page:      m.getPage(req),
-		Session:   s,
-		Confirmed: confirmed,
-		Groups:    filteredGroups,
-		Solo:      solo,
+		Page:              m.getPage(req),
+		Session:           s,
+		Groups:            groups,
+		Solo:              solo,
+		InteriorsNoRender: interiorsNoRender,
+		InteriorsPartial:  interiorsPartial,
+		ThresholdPct:      int(layoutSimilarityThreshold * 100),
 	})
+}
+
+// debugSimilarityMatrix is a temporary verification-only endpoint for
+// this session's testing -- not wired into any UI, remove before
+// finalizing.
+func (m *Map) debugSimilarityMatrix(rw http.ResponseWriter, req *http.Request) {
+	s := m.getSession(req)
+	if s == nil || !s.Auths.Has(AUTH_ADMIN) {
+		http.Redirect(rw, req, "/", 302)
+		return
+	}
+	ids := []int{5, 6, 7, 11, 12, 13, 14, 15, 25, 26}
+	if raw := req.FormValue("ids"); raw != "" {
+		ids = nil
+		for _, part := range strings.Split(raw, ",") {
+			if id, err := strconv.Atoi(strings.TrimSpace(part)); err == nil {
+				ids = append(ids, id)
+			}
+		}
+	}
+	_, candidates, _, err := m.findSmallMapCandidates()
+	if err != nil {
+		http.Error(rw, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	tileSets := map[int][]landmarkTile{}
+	for _, id := range ids {
+		if entries, ok := candidates[id]; ok {
+			tileSets[id] = m.buildLandmarkTiles(entries)
+		}
+	}
+	result := map[string]float64{}
+	for i := 0; i < len(ids); i++ {
+		for j := i + 1; j < len(ids); j++ {
+			a, b := ids[i], ids[j]
+			key := fmt.Sprintf("%d-%d", a, b)
+			if tileSets[a] == nil || tileSets[b] == nil {
+				result[key] = -1
+				continue
+			}
+			result[key] = landmarkSetSimilarity(tileSets[a], tileSets[b])
+		}
+	}
+	json.NewEncoder(rw).Encode(result)
+}
+
+// debugInteriors is a temporary verification-only endpoint for this
+// session's testing -- not wired into any UI, remove before finalizing.
+func (m *Map) debugInteriors(rw http.ResponseWriter, req *http.Request) {
+	s := m.getSession(req)
+	if s == nil || !s.Auths.Has(AUTH_ADMIN) {
+		http.Redirect(rw, req, "/", 302)
+		return
+	}
+	noRender, partial, err := m.findInteriorMaps()
+	if err != nil {
+		http.Error(rw, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	json.NewEncoder(rw).Encode(struct {
+		NoRender []MapInfo
+		Partial  []MapInfo
+	}{noRender, partial})
+}
+
+// debugMapMeta is a temporary verification-only endpoint for this
+// session's testing -- not wired into any UI, remove before finalizing.
+// Dumps per-map metadata (grid count, entry-marker status, every marker
+// image present, per-tile dark fraction) for a requested set of map
+// ids, to compare candidates that don't have enough landmark signal
+// for the normal similarity matrix.
+func (m *Map) debugMapMeta(rw http.ResponseWriter, req *http.Request) {
+	s := m.getSession(req)
+	if s == nil || !s.Auths.Has(AUTH_ADMIN) {
+		http.Redirect(rw, req, "/", 302)
+		return
+	}
+	var ids []int
+	for _, part := range strings.Split(req.FormValue("ids"), ",") {
+		if id, err := strconv.Atoi(strings.TrimSpace(part)); err == nil {
+			ids = append(ids, id)
+		}
+	}
+	_, candidates, _, err := m.findSmallMapCandidates()
+	if err != nil {
+		http.Error(rw, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	gridToMap := map[string]int{}
+	for mapid, entries := range candidates {
+		for _, e := range entries {
+			gridToMap[e.id] = mapid
+		}
+	}
+	markerImages := map[int]map[string]int{}
+	m.db.View(func(tx *bbolt.Tx) error {
+		mb := tx.Bucket([]byte("markers"))
+		if mb == nil {
+			return nil
+		}
+		grid := mb.Bucket([]byte("grid"))
+		if grid == nil {
+			return nil
+		}
+		return grid.ForEach(func(k, v []byte) error {
+			gridID := strings.SplitN(string(k), "_", 2)[0]
+			mapid, ok := gridToMap[gridID]
+			if !ok {
+				return nil
+			}
+			marker := Marker{}
+			if json.Unmarshal(v, &marker) == nil {
+				if markerImages[mapid] == nil {
+					markerImages[mapid] = map[string]int{}
+				}
+				markerImages[mapid][marker.Image]++
+			}
+			return nil
+		})
+	})
+
+	type mapMeta struct {
+		GridCount    int
+		DarkFractions []float64
+		MarkerImages map[string]int
+	}
+	result := map[int]mapMeta{}
+	for _, id := range ids {
+		entries, ok := candidates[id]
+		if !ok {
+			continue
+		}
+		var darkFracs []float64
+		for _, e := range entries {
+			f, err := os.Open(filepath.Join(m.gridStorage, "grids", e.id+".png"))
+			if err != nil {
+				continue
+			}
+			img, _, err := image.Decode(f)
+			f.Close()
+			if err != nil {
+				continue
+			}
+			darkFracs = append(darkFracs, tileDarkFraction(img))
+		}
+		result[id] = mapMeta{GridCount: len(entries), DarkFractions: darkFracs, MarkerImages: markerImages[id]}
+	}
+	json.NewEncoder(rw).Encode(result)
+}
+
+// debugMapShape is a temporary verification-only endpoint for this
+// session's testing -- not wired into any UI, remove before finalizing.
+func (m *Map) debugMapShape(rw http.ResponseWriter, req *http.Request) {
+	s := m.getSession(req)
+	if s == nil || !s.Auths.Has(AUTH_ADMIN) {
+		http.Redirect(rw, req, "/", 302)
+		return
+	}
+	mapid, err := strconv.Atoi(req.FormValue("map"))
+	if err != nil {
+		http.Error(rw, "map parse failed", http.StatusBadRequest)
+		return
+	}
+	type coord struct {
+		ID   string
+		X, Y int
+	}
+	var coords []coord
+	m.db.View(func(tx *bbolt.Tx) error {
+		grids := tx.Bucket([]byte("grids"))
+		if grids == nil {
+			return nil
+		}
+		return grids.ForEach(func(k, v []byte) error {
+			gd := GridData{}
+			if json.Unmarshal(v, &gd) == nil && gd.Map == mapid {
+				coords = append(coords, coord{ID: gd.ID, X: gd.Coord.X, Y: gd.Coord.Y})
+			}
+			return nil
+		})
+	})
+	sort.Slice(coords, func(i, j int) bool {
+		if coords[i].X != coords[j].X {
+			return coords[i].X < coords[j].X
+		}
+		return coords[i].Y < coords[j].Y
+	})
+	json.NewEncoder(rw).Encode(coords)
 }
 
 // stitchMap composites every grid tile a map has into one image, laid

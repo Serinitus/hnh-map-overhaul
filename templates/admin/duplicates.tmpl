@@ -45,21 +45,35 @@
                 some legitimate small maps to show up here too, especially
                 in the lower-confidence section below.</p>
 
-            <h5><span class="confidence-high">&#9679;</span> Confirmed -- matches known spawn-zone reference</h5>
-            <p>Maps that match at least 90% of a known-good spawn zone
-                layout captured directly from a live character spawn.
-                Unlike the sections below, this catches a spawn zone even
-                if it's the only instance of its particular seed in the
-                data right now -- it doesn't need another map to match
-                against.</p>
-            {{if not .Confirmed}}
+            <h5><span class="confidence-high">&#9679;</span> Player structure -- no minimap ever rendered</h5>
+            <p>Maps that are 100.000% black on every single tile, with zero
+                exceptions. Real houses and stonesteads have no in-game
+                minimap at all, so this is the strongest signal in this
+                report -- there is nothing on these layers to lose.</p>
+            {{if not .InteriorsNoRender}}
             <p><i>None found.</i></p>
             {{else}}
-            {{template "admin/duplicates.tmpl:maptable" .Confirmed}}
+            {{template "admin/duplicates.tmpl:maptable" .InteriorsNoRender}}
+            {{end}}
+
+            <h5><span class="confidence-high">&#9679;</span> Dungeon/basement instance -- partial minimap content</h5>
+            <p>Maps that are almost entirely black like the group above, but
+                at least one tile has a sliver of real rendered content
+                (a corridor or wall line) -- consistent with a real dungeon
+                or basement instance rather than a player structure. Not
+                sorted by which specific instance template each one is (real
+                interior content is too sparse per-tile for that yet) --
+                every one lands in this bucket for review, worth a closer
+                look before deleting since there's actual explored content
+                here.</p>
+            {{if not .InteriorsPartial}}
+            <p><i>None found.</i></p>
+            {{else}}
+            {{template "admin/duplicates.tmpl:maptable" .InteriorsPartial}}
             {{end}}
 
             <h5><span class="confidence-high">&#9679;</span> High confidence -- shared layout, no entrance marker</h5>
-            <p>Maps that both match at least 90% of another map's tile
+            <p>Maps that both match at least {{.ThresholdPct}}% of another map's tile
                 layout <i>and</i> have no Mineshaft/Cave marker on them --
                 every confirmed spawn zone found in testing hit both signals
                 at once.</p>
@@ -80,7 +94,7 @@
             {{end}}
 
             <h5><span class="confidence-low">&#9679;</span> Lower confidence -- shared layout only</h5>
-            <p>Maps that match at least 90% of another map's layout but do
+            <p>Maps that match at least {{.ThresholdPct}}% of another map's layout but do
                 have an entrance marker on them -- less likely to be junk,
                 but still worth a look since a real map shouldn't normally
                 duplicate another one's tiles.</p>
@@ -118,9 +132,12 @@
 </html>
 
 {{define "admin/duplicates.tmpl:maptable"}}
+<form method="POST" action="/admin/deleteMaps" onsubmit="var n=this.querySelectorAll('input[name=map]:checked').length; if(n===0){alert('Select at least one map first.'); return false;} return confirm('Delete '+n+' selected map(s)? This removes every grid, tile, marker, road, and custom marker on each one. THIS CANNOT BE UNDONE.');">
+<input type="hidden" name="redirect" value="/admin/duplicateMaps">
 <table>
     <thead>
         <tr>
+            <th><label><input type="checkbox" title="Select all" onclick="this.closest('table').querySelectorAll('input[name=map]').forEach(cb=>cb.checked=this.checked)"/><span></span></label></th>
             <th>ID</th>
             <th>Name</th>
             <th>Actions</th>
@@ -129,12 +146,23 @@
     <tbody>
         {{range .}}
         <tr>
+            <td><label><input type="checkbox" name="map" value="{{.ID}}"/><span></span></label></td>
             <td>{{.ID}}</td>
             <td>{{.Name}}</td>
             <td>
                 <div class="icon-btn-group" style="display:flex;gap:4px;">
                     <a href="/admin/map?map={{.ID}}" class="icon-btn" title="Edit"><i class="material-icons">edit</i></a>
+                    <a href="#previewMap-{{.ID}}" class="icon-btn modal-trigger" title="Preview stitched image"><i class="material-icons">image</i></a>
                     <a href="#deleteMap-{{.ID}}" class="icon-btn icon-btn-delete modal-trigger" title="Delete"><i class="material-icons">close</i></a>
+                </div>
+                <div id="previewMap-{{.ID}}" class="modal">
+                    <div class="modal-content">
+                        <h4>Preview -- "{{.Name}}"</h4>
+                        <img src="/admin/mapPreview?map={{.ID}}" style="max-width:100%;image-rendering:pixelated;border:1px solid #444;">
+                    </div>
+                    <div class="modal-footer">
+                        <a href="#!" class="modal-close waves-effect waves-light green btn">Close</a>
+                    </div>
                 </div>
                 <div id="deleteMap-{{.ID}}" class="modal">
                     <div class="modal-content">
@@ -144,7 +172,7 @@
                     </div>
                     <div class="modal-footer">
                         <a href="#!" class="modal-close waves-effect waves-light green btn">Cancel</a>
-                        <a href="/admin/deleteMap?map={{.ID}}" class="waves-effect waves-light red btn">DELETE</a>
+                        <a href="/admin/deleteMap?map={{.ID}}&redirect=/admin/duplicateMaps" class="waves-effect waves-light red btn">DELETE</a>
                     </div>
                 </div>
             </td>
@@ -152,4 +180,6 @@
         {{end}}
     </tbody>
 </table>
+<button type="submit" class="waves-effect waves-light red btn" style="margin: 8px 0 16px;">Delete Selected</button>
+</form>
 {{end}}

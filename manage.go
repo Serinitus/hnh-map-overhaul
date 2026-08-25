@@ -20,19 +20,78 @@ func clientIP(req *http.Request) string {
 	return req.RemoteAddr
 }
 
+// requestOrigin resolves the scheme+host a client actually used to
+// reach this server, so a token URL built from it is guaranteed valid
+// for copy/pasting straight back in -- whatever page it's rendered on
+// was necessarily reached the same way. Checks X-Forwarded-Proto/Host
+// first (set by a reverse proxy such as nginx terminating TLS in front
+// of this server, same reasoning as clientIP's X-Forwarded-For check
+// above), falling back to req.TLS and req.Host for a direct connection.
+func requestOrigin(req *http.Request) string {
+	host := req.Header.Get("X-Forwarded-Host")
+	if host == "" {
+		host = req.Host
+	}
+	scheme := req.Header.Get("X-Forwarded-Proto")
+	if scheme == "" {
+		if req.TLS != nil {
+			scheme = "https"
+		} else {
+			scheme = "http"
+		}
+	}
+	return scheme + "://" + host
+}
+
 func (m *Map) index(rw http.ResponseWriter, req *http.Request) {
 	s := m.getSession(req)
 	if s == nil {
-		if m.getPublicConfig().Enabled {
+		pub := m.getPublicConfig()
+		if !pub.Enabled {
+			http.Redirect(rw, req, "/login", 302)
+			return
+		}
+		if !req.URL.Query().Has("tokens") {
+			// Bare "/" (typed directly, a bookmark, etc) still goes
+			// straight to the map for a public visitor -- only the
+			// explicit "Tokens" nav link (which points at /?tokens)
+			// shows the locked token view below.
 			http.Redirect(rw, req, "/map/", 302)
 			return
 		}
-		http.Redirect(rw, req, "/login", 302)
+		// Public access, no real session -- show the locked single
+		// shared token (if the admin set one) instead of a personal
+		// token list. Reached only via the navbar/app-bar "Tokens"
+		// link, not the bare root path (see the redirect just above).
+		tokens := []string{}
+		if pub.Token != "" {
+			tokens = []string{pub.Token}
+		}
+		m.ExecuteTemplate(rw, "index.tmpl", struct {
+			Page         Page
+			Session      *Session
+			UploadTokens []string
+			Prefix       string
+			Locked       bool
+		}{
+			Page:         m.getPage(req),
+			Session:      &Session{Auths: pub.Auths},
+			UploadTokens: tokens,
+			Prefix:       requestOrigin(req),
+			Locked:       true,
+		})
 		return
 	}
 
 	tokens := []string{}
-	prefix := "http://example.com"
+	// Auto-resolved from the request that's loading this very page --
+	// whatever origin got used to reach here is necessarily a valid one
+	// to paste back into a client tool. The stored "prefix" config
+	// (set via /admin/setPrefix) still overrides this when explicitly
+	// set, for the rare case a server sits behind something that makes
+	// the request's own origin unusable (e.g. an internal hostname that
+	// doesn't match the public one clients need).
+	prefix := requestOrigin(req)
 	m.db.View(func(tx *bbolt.Tx) error {
 		b := tx.Bucket([]byte("users"))
 		if b == nil {
@@ -48,7 +107,9 @@ func (m *Map) index(rw http.ResponseWriter, req *http.Request) {
 
 		config := tx.Bucket([]byte("config"))
 		if config != nil {
-			prefix = string(config.Get([]byte("prefix")))
+			if stored := string(config.Get([]byte("prefix"))); stored != "" {
+				prefix = stored
+			}
 		}
 		return nil
 	})
@@ -58,11 +119,13 @@ func (m *Map) index(rw http.ResponseWriter, req *http.Request) {
 		Session      *Session
 		UploadTokens []string
 		Prefix       string
+		Locked       bool
 	}{
 		Page:         m.getPage(req),
 		Session:      s,
 		UploadTokens: tokens,
 		Prefix:       prefix,
+		Locked:       false,
 	})
 }
 

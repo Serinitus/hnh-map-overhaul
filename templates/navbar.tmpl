@@ -6,18 +6,24 @@
         </a>
         <ul style="display:flex;align-items:center;list-style:none;margin:0;">
             <li><a href="/map">Map</a></li>
-            <li><a href="/">Tokens</a></li>
+            {{if ne .Page.CurrentPath "/"}}<li><a href="/">Tokens</a></li>{{end}}
+            {{if .Session.Username}}
             <li>
                 <a class="dropdown-trigger" href="#!" data-target="navbar-user-dropdown">{{.Session.Username}}<i class="material-icons right">arrow_drop_down</i></a>
             </li>
+            {{else}}
+            <li><a href="/login">Login</a></li>
+            {{end}}
         </ul>
     </div>
 </nav>
+{{if .Session.Username}}
 <ul id="navbar-user-dropdown" class="dropdown-content">
     {{if .Session.Auths.Has "admin"}}<li><a href="/admin">Admin</a></li>{{end}}
     <li><a href="/settings">Settings</a></li>
     <li><a href="/logout">Logout</a></li>
 </ul>
+{{end}}
 <script>
     document.addEventListener('DOMContentLoaded', function () {
         var els = document.querySelectorAll('.dropdown-trigger');

@@ -21,6 +21,12 @@
                         <label for="username">Name</label>
                     </div>
                 </div>
+                <div class="row">
+                    <div class="input-field col s12">
+                        <input id="sortOrder" type="number" name="sortOrder" value="{{.MapInfo.SortOrder}}">
+                        <label for="sortOrder" class="active">Sort Order (position in the map-switcher dropdown -- lower first, ties broken by name)</label>
+                    </div>
+                </div>
                 <div class="col s12">
                     <ul class="collection with-header">
                         <li class="collection-item">

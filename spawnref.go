@@ -1,12 +1,10 @@
 package main
 
 import (
-	"crypto/sha256"
 	"embed"
-	"encoding/hex"
 	"encoding/json"
-	"fmt"
-	"io"
+	"image"
+	_ "image/png"
 	"log"
 )
 
@@ -33,13 +31,16 @@ type spawnRefCoord struct {
 	Y  int    `json:"y"`
 }
 
-// spawnReferenceTileSet is loaded once at startup, same
-// {"relX,relY": tileHash} shape buildTileSet produces for a real map --
-// same key format (fmt.Sprintf("%d,%d", ...)) and same hash source (raw
-// file bytes, not a decode/re-encode round trip, which would never
-// match buildTileSet's hashes for identical-looking tiles) so it can go
-// through the exact same tileSetSimilarity comparison.
-var spawnReferenceTileSet map[string]string
+// spawnReferenceLandmarks is loaded once at startup -- same landmark
+// tile signatures buildLandmarkTiles produces for a real map (see
+// tileSignature's comment for why raw pixel/byte comparison doesn't
+// work: Haven & Hearth re-rolls each grass tile's texture variant per
+// capture, so two renders of the identical template never hash or
+// pixel-match on their grass background). Goes through the exact same
+// landmarkSetSimilarity comparison as any other map. coords.json's X/Y
+// fields aren't used for the comparison itself -- kept as a record of
+// what was actually captured.
+var spawnReferenceLandmarks []landmarkTile
 
 func init() {
 	raw, err := spawnRefFS.ReadFile("spawnref/coords.json")
@@ -53,33 +54,24 @@ func init() {
 		return
 	}
 
-	minX, minY := coords[0].X, coords[0].Y
-	for _, c := range coords {
-		if c.X < minX {
-			minX = c.X
-		}
-		if c.Y < minY {
-			minY = c.Y
-		}
-	}
-
-	tiles := map[string]string{}
+	var tiles []landmarkTile
 	for _, c := range coords {
 		f, err := spawnRefFS.Open("spawnref/tiles/" + c.ID + ".png")
 		if err != nil {
 			log.Printf("spawnref: missing tile %s: %v", c.ID, err)
 			continue
 		}
-		h := sha256.New()
-		_, copyErr := io.Copy(h, f)
+		img, _, err := image.Decode(f)
 		f.Close()
-		if copyErr != nil {
-			log.Printf("spawnref: failed to read tile %s: %v", c.ID, copyErr)
+		if err != nil {
+			log.Printf("spawnref: failed to decode tile %s: %v", c.ID, err)
 			continue
 		}
-		key := fmt.Sprintf("%d,%d", c.X-minX, c.Y-minY)
-		tiles[key] = hex.EncodeToString(h.Sum(nil))
+		sig := tileSignature(img)
+		if nonGrassCount(sig) >= minLandmarkCells {
+			tiles = append(tiles, landmarkTile{ID: c.ID, Sig: sig})
+		}
 	}
-	spawnReferenceTileSet = tiles
-	log.Printf("spawnref: loaded %d reference tiles", len(tiles))
+	spawnReferenceLandmarks = tiles
+	log.Printf("spawnref: loaded %d landmark tiles", len(tiles))
 }

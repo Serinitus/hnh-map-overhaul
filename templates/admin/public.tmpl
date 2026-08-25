@@ -35,6 +35,24 @@
                 <div class="col s12">
                     <ul class="collection with-header">
                         <li class="collection-header">
+                            <h6>Public upload token</h6>
+                            <p>Optional. A real token from some account's Tokens page (with
+                                Upload permission) to advertise on the public Tokens page for
+                                anonymous visitors to copy into a client tool -- shared
+                                infrastructure, not a personal credential. Leave blank to show
+                                no token there.</p>
+                        </li>
+                        <li class="collection-item">
+                            <div class="input-field">
+                                <input id="token" type="text" name="token" value="{{.Config.Token}}">
+                                <label for="token" class="active">Token</label>
+                            </div>
+                        </li>
+                    </ul>
+                </div>
+                <div class="col s12">
+                    <ul class="collection with-header">
+                        <li class="collection-header">
                             <h6>Roles</h6>
                         </li>
                         <li class="collection-item">

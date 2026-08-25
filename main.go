@@ -136,10 +136,16 @@ func main() {
 	http.HandleFunc("/admin/export", m.export)
 	http.HandleFunc("/admin/merge", m.merge)
 	http.HandleFunc("/admin/map", m.adminMap)
+	http.HandleFunc("/admin/setMapOrder", m.setMapOrder)
 	http.HandleFunc("/admin/mapic", m.adminICMap)
 	http.HandleFunc("/admin/deleteMap", m.deleteMap)
+	http.HandleFunc("/admin/deleteMaps", m.deleteMaps)
 	http.HandleFunc("/admin/duplicateMaps", m.adminDuplicateMaps)
 	http.HandleFunc("/admin/mapPreview", m.adminMapPreview)
+	http.HandleFunc("/admin/debugSimilarityMatrix", m.debugSimilarityMatrix)
+	http.HandleFunc("/admin/debugMapShape", m.debugMapShape)
+	http.HandleFunc("/admin/debugInteriors", m.debugInteriors)
+	http.HandleFunc("/admin/debugMapMeta", m.debugMapMeta)
 
 	// Map frontend endpoints
 	http.HandleFunc("/map/api/v1/characters", m.getChars)
@@ -207,6 +213,12 @@ type MapInfo struct {
 	// means visible to anyone with the base "map" auth, same as before
 	// this field existed.
 	RequiredAuth string
+	// SortOrder controls where a map falls in the frontend's map-switcher
+	// dropdown -- ascending, ties broken by Name. Defaults to 0, so any
+	// map that's never had an order explicitly set just sorts by name
+	// alongside every other un-ordered map, same as before this field
+	// existed.
+	SortOrder int
 }
 
 type GridData struct {
@@ -339,6 +351,14 @@ func (m *Map) getSession(req *http.Request) *Session {
 type PublicConfig struct {
 	Enabled bool
 	Auths   Auths
+	// Token is a real, already-generated upload token (from some real
+	// account's Tokens page) that the admin has chosen to advertise on
+	// the public Tokens page for anonymous visitors to copy -- shared
+	// infrastructure, not a per-visitor credential. Upload permission
+	// still comes entirely from whichever real account originally
+	// generated it (see client() in client.go); this field is display
+	// only. Empty means the public Tokens page shows no token at all.
+	Token string
 }
 
 func (m *Map) getPublicConfig() PublicConfig {
@@ -401,10 +421,14 @@ func (m *Map) saveSession(s *Session) {
 
 type Page struct {
 	Title string `json:"title"`
+	// CurrentPath is the request's URL path, not persisted -- lets
+	// navbar.tmpl skip rendering a link to whatever page it's already
+	// being shown on (see navbar.tmpl's Tokens link).
+	CurrentPath string `json:"-"`
 }
 
 func (m *Map) getPage(req *http.Request) Page {
-	p := Page{}
+	p := Page{CurrentPath: req.URL.Path}
 	m.db.View(func(tx *bbolt.Tx) error {
 		c := tx.Bucket([]byte("config"))
 		if c == nil {

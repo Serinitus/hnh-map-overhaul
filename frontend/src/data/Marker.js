@@ -81,7 +81,7 @@ export class Marker {
         if (isCustom && !isCave) {
             return getCustomMarkerIcon('white');
         }
-        let hsz = isThingwall ? Math.round(45 * iconScale(zoom) * (thingwallScale || 1)) : isMineshaft ? 13.5 : 18;
+        let hsz = isThingwall ? Math.round(45 * iconScale(zoom) * (thingwallScale || 1)) : (isMineshaft || isCave) ? 13.5 : 18;
         let url = isMineshaft ? `${MINESHAFT_ICON[this.image]}.png` : `${this.image}.png`;
         if (isCave)
             url = 'gfx/hud/mmap/cave.png';

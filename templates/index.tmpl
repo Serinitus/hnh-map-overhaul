@@ -14,20 +14,39 @@
 		{{template "navbar.tmpl" .}}
 		<div class="container">
 			<div class="row">
+			{{if not .Locked}}
 			<div class="col s3">
 			<a class="waves-effect waves-light btn" href="/password">Change Password</a><br>
 			</div>
+			{{end}}
 			<div class="col s9">
 			{{if .Session.Auths.Has "upload" }}
 				<ul class="collection with-header">
-				<li class="collection-header">Here are your existing upload tokens.</li>
+				<li class="collection-header">{{if .Locked}}Shared public upload token.{{else}}Here are your existing upload tokens.{{end}}</li>
 				{{range .UploadTokens}}
-					<li class="collection-item">{{$.Prefix}}/client/{{.}}</li>
+					<li class="collection-item token-line" data-token="{{.}}">{{$.Prefix}}/client/{{.}}</li>
 				{{else}}
-					<li class="collection-item">You have no tokens, generate one now!</li>
+					<li class="collection-item">{{if .Locked}}No shared token has been set up yet.{{else}}You have no tokens, generate one now!{{end}}</li>
 				{{end}}
 				</ul>
+				{{if not .Locked}}
 				<a class="waves-effect waves-light btn" href="/generateToken">Generate Token</a>
+				{{end}}
+				{{if .UploadTokens}}
+				<p style="margin-bottom:0;color:#9e9e9e;font-size:0.85rem;">Not reachable from your client? Edit the address below -- just for you, nothing is saved.</p>
+				<div class="input-field" style="max-width:500px;">
+					<input id="prefixOverride" type="text" value="{{.Prefix}}">
+					<label for="prefixOverride" class="active">Address override</label>
+				</div>
+				<script>
+					document.getElementById('prefixOverride').addEventListener('input', function (e) {
+						var value = e.target.value.replace(/\/+$/, '');
+						document.querySelectorAll('.token-line').forEach(function (el) {
+							el.textContent = value + '/client/' + el.dataset.token;
+						});
+					});
+				</script>
+				{{end}}
 			{{end}}
 			</div>
 			</div>
