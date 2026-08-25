@@ -1,0 +1,141 @@
+<!doctype html>
+<html>
+	<head>
+		<meta charset="utf-8">
+		<meta name="viewport" content="width=device-width, initial-scale=1, shrink-to-fit=no">
+		<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/materialize/1.0.0/css/materialize.min.css">
+		<link href="https://fonts.googleapis.com/icon?family=Material+Icons" rel="stylesheet">
+		<link rel="stylesheet" href="/js/dark.css">
+		<style>
+			.icon-btn {
+				display: inline-flex;
+				align-items: center;
+				justify-content: center;
+				width: 30px;
+				height: 30px;
+				border-radius: 50%;
+				border: 1px solid #fff;
+				color: #fff;
+				text-decoration: none;
+				cursor: pointer;
+			}
+			.icon-btn.icon-btn-delete {
+				background: #d32f2f;
+				border-color: #d32f2f;
+				color: #000;
+			}
+			.confidence-high {
+				color: #4caf50;
+			}
+			.confidence-low {
+				color: #ffb74d;
+			}
+		</style>
+        <title>{{.Page.Title}} - Admin</title>
+	</head>
+	<body>
+		{{template "navbar.tmpl" .}}
+		<div class="container">
+            <h4>Duplicates Detected <span style="font-size:0.6em;opacity:0.7;">(Experimental)</span></h4>
+            <p>Maps under 20 grids flagged as likely spawn zones, dungeon
+                instances, house interiors, or other generated/orphaned
+                layers. Nothing here is deleted automatically -- review each
+                one and delete it directly from this page, or leave it
+                alone. This detector is new and still being tuned; expect
+                some legitimate small maps to show up here too, especially
+                in the lower-confidence section below.</p>
+
+            <h5><span class="confidence-high">&#9679;</span> High confidence -- shared layout, no entrance marker</h5>
+            <p>Maps that both match another map's exact tile layout <i>and</i>
+                have no Mineshaft/Cave marker on them -- every confirmed
+                spawn zone found in testing hit both signals at once.</p>
+            {{$anyHighConfidence := false}}
+            {{range .Groups}}{{if .NoneHaveEntry}}{{$anyHighConfidence = true}}{{end}}{{end}}
+            {{if not $anyHighConfidence}}
+            <p><i>None found.</i></p>
+            {{end}}
+            {{range .Groups}}
+            {{if .NoneHaveEntry}}
+            <div class="card">
+                <div class="card-content">
+                    <h5>{{len .Maps}} maps, {{.GridCount}} grids each</h5>
+                    {{template "admin/duplicates.tmpl:maptable" .Maps}}
+                </div>
+            </div>
+            {{end}}
+            {{end}}
+
+            <h5><span class="confidence-low">&#9679;</span> Lower confidence -- shared layout only</h5>
+            <p>Maps that match another map's layout but do have an entrance
+                marker on them -- less likely to be junk, but still worth a
+                look since a real map shouldn't normally duplicate another
+                one's exact tiles.</p>
+            {{$anyLowConfidence := false}}
+            {{range .Groups}}{{if not .NoneHaveEntry}}{{$anyLowConfidence = true}}{{end}}{{end}}
+            {{if not $anyLowConfidence}}
+            <p><i>None found.</i></p>
+            {{end}}
+            {{range .Groups}}
+            {{if not .NoneHaveEntry}}
+            <div class="card">
+                <div class="card-content">
+                    <h5>{{len .Maps}} maps, {{.GridCount}} grids each</h5>
+                    {{template "admin/duplicates.tmpl:maptable" .Maps}}
+                </div>
+            </div>
+            {{end}}
+            {{end}}
+
+            <h5><span class="confidence-low">&#9679;</span> Lower confidence -- no entrance marker, no layout match</h5>
+            <p>Small maps with no entrance marker that don't match any other
+                map's layout. In testing this caught real spawn zones, but
+                also real dungeons/caves whose entrance marker simply never
+                got uploaded (an older client, or icons not yet enabled) --
+                check each one before deleting.</p>
+            {{if not .Solo}}
+            <p><i>None found.</i></p>
+            {{else}}
+            {{template "admin/duplicates.tmpl:maptable" .Solo}}
+            {{end}}
+		</div>
+        <script src="https://cdnjs.cloudflare.com/ajax/libs/materialize/1.0.0/js/materialize.min.js"></script>
+        <script>M.AutoInit();</script>
+	</body>
+</html>
+
+{{define "admin/duplicates.tmpl:maptable"}}
+<table>
+    <thead>
+        <tr>
+            <th>ID</th>
+            <th>Name</th>
+            <th>Actions</th>
+        </tr>
+    </thead>
+    <tbody>
+        {{range .}}
+        <tr>
+            <td>{{.ID}}</td>
+            <td>{{.Name}}</td>
+            <td>
+                <div class="icon-btn-group" style="display:flex;gap:4px;">
+                    <a href="/admin/map?map={{.ID}}" class="icon-btn" title="Edit"><i class="material-icons">edit</i></a>
+                    <a href="#deleteMap-{{.ID}}" class="icon-btn icon-btn-delete modal-trigger" title="Delete"><i class="material-icons">close</i></a>
+                </div>
+                <div id="deleteMap-{{.ID}}" class="modal">
+                    <div class="modal-content">
+                        <h4>Delete "{{.Name}}"</h4>
+                        <p>This will remove every grid, tile, marker, road, and custom marker on this map layer.</p>
+                        <h5>THIS CANNOT BE UNDONE!</h5>
+                    </div>
+                    <div class="modal-footer">
+                        <a href="#!" class="modal-close waves-effect waves-light green btn">Cancel</a>
+                        <a href="/admin/deleteMap?map={{.ID}}" class="waves-effect waves-light red btn">DELETE</a>
+                    </div>
+                </div>
+            </td>
+        </tr>
+        {{end}}
+    </tbody>
+</table>
+{{end}}

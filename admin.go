@@ -2,6 +2,8 @@ package main
 
 import (
 	"archive/zip"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -10,6 +12,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -1342,3 +1345,438 @@ func (m *Map) adminMap(rw http.ResponseWriter, req *http.Request) {
 		TierOptions: tierOptions,
 	})
 }
+
+// deleteMap permanently removes a map layer and everything scoped to it --
+// grids, tiles, markers, roads, and custom markers -- unlike Hide (map.go's
+// toggle-hidden), which only stops it from being listed. Irreversible, no
+// backing up/soft-delete; mirrors the existing "Wipe all data" pattern
+// (see wipe() above) but scoped to one map instead of every map.
+func (m *Map) deleteMap(rw http.ResponseWriter, req *http.Request) {
+	s := m.getSession(req)
+	if s == nil || !s.Auths.Has(AUTH_ADMIN) {
+		http.Redirect(rw, req, "/", 302)
+		return
+	}
+
+	mapid, err := strconv.Atoi(req.FormValue("map"))
+	if err != nil {
+		http.Error(rw, "map parse failed", http.StatusBadRequest)
+		return
+	}
+	mapKey := []byte(strconv.Itoa(mapid))
+
+	err = m.db.Update(func(tx *bbolt.Tx) error {
+		// Grids: flat bucket keyed by grid ID, each value carrying which
+		// map it belongs to -- collect the grid IDs for this map first,
+		// both to delete them and because markers below are keyed by
+		// grid ID, not map ID, so we need that set to find them.
+		deletedGridIDs := map[string]bool{}
+		if grids := tx.Bucket([]byte("grids")); grids != nil {
+			c := grids.Cursor()
+			for k, v := c.First(); k != nil; k, v = c.Next() {
+				gd := GridData{}
+				if json.Unmarshal(v, &gd) == nil && gd.Map == mapid {
+					deletedGridIDs[string(k)] = true
+				}
+			}
+			for gid := range deletedGridIDs {
+				if err := grids.Delete([]byte(gid)); err != nil {
+					return err
+				}
+			}
+		}
+
+		// Markers: stored under markers/grid, keyed by "{gridID}_{x}_{y}"
+		// (see markerUpdate in client.go), with markers/id as a separate
+		// id->gridkey index for admin lookups by numeric ID. Delete both
+		// sides for every marker whose grid ID is one we just removed.
+		if mb := tx.Bucket([]byte("markers")); mb != nil {
+			deletedGridKeys := map[string]bool{}
+			if grid := mb.Bucket([]byte("grid")); grid != nil {
+				c := grid.Cursor()
+				for k, _ := c.First(); k != nil; k, _ = c.Next() {
+					gridID := strings.SplitN(string(k), "_", 2)[0]
+					if deletedGridIDs[gridID] {
+						deletedGridKeys[string(k)] = true
+					}
+				}
+				for gk := range deletedGridKeys {
+					if err := grid.Delete([]byte(gk)); err != nil {
+						return err
+					}
+				}
+			}
+			if idB := mb.Bucket([]byte("id")); idB != nil {
+				staleIDs := [][]byte{}
+				c := idB.Cursor()
+				for k, v := c.First(); k != nil; k, v = c.Next() {
+					if deletedGridKeys[string(v)] {
+						staleIDs = append(staleIDs, append([]byte{}, k...))
+					}
+				}
+				for _, k := range staleIDs {
+					if err := idB.Delete(k); err != nil {
+						return err
+					}
+				}
+			}
+		}
+
+		// Roads and Custom Markers: flat buckets keyed by their own
+		// numeric ID, each value carrying a Map field directly.
+		if roads := tx.Bucket([]byte("roads")); roads != nil {
+			stale := [][]byte{}
+			c := roads.Cursor()
+			for k, v := c.First(); k != nil; k, v = c.Next() {
+				r := Road{}
+				if json.Unmarshal(v, &r) == nil && r.Map == mapid {
+					stale = append(stale, append([]byte{}, k...))
+				}
+			}
+			for _, k := range stale {
+				if err := roads.Delete(k); err != nil {
+					return err
+				}
+			}
+		}
+		if cm := tx.Bucket([]byte("customMarkers")); cm != nil {
+			stale := [][]byte{}
+			c := cm.Cursor()
+			for k, v := c.First(); k != nil; k, v = c.Next() {
+				marker := CustomMarker{}
+				if json.Unmarshal(v, &marker) == nil && marker.Map == mapid {
+					stale = append(stale, append([]byte{}, k...))
+				}
+			}
+			for _, k := range stale {
+				if err := cm.Delete(k); err != nil {
+					return err
+				}
+			}
+		}
+
+		// Tiles: already nested as tiles/{mapID}/{zoom}/{coord} (see
+		// SaveTile in tile.go), so this is the one bucket that doesn't
+		// need scanning -- just drop its whole sub-bucket.
+		if tiles := tx.Bucket([]byte("tiles")); tiles != nil {
+			if tiles.Bucket(mapKey) != nil {
+				if err := tiles.DeleteBucket(mapKey); err != nil {
+					return err
+				}
+			}
+		}
+
+		maps, err := tx.CreateBucketIfNotExists([]byte("maps"))
+		if err != nil {
+			return err
+		}
+		return maps.Delete(mapKey)
+	})
+	if err != nil {
+		log.Println(err)
+		http.Error(rw, "internal error", http.StatusInternalServerError)
+		return
+	}
+
+	http.Redirect(rw, req, "/admin", 302)
+}
+
+// DuplicateGroup is a set of maps that appear to be the same templated
+// layout -- e.g. spawn zones, and likely dungeons/house interiors too,
+// since Haven & Hearth generates all of these from a fixed set of
+// templates rather than exploring real terrain. Detection only, no
+// auto-delete -- deleteMap above handles removal once a human confirms
+// a group is actually junk.
+type DuplicateGroup struct {
+	Fingerprint string
+	Maps        []MapInfo
+	GridCount   int
+	// NoneHaveEntry is true when every map in this group also has zero
+	// Mineshaft/Cave-type markers -- both signals agreeing is a stronger
+	// hint than either alone (confirmed against real spawn-zone data:
+	// every spawn zone found this way hit both signals at once).
+	NoneHaveEntry bool
+}
+
+// maxSpawnZoneGrids is the size cutoff below which a map is even
+// considered as a duplicate-template candidate -- real explored areas
+// (however small) grow past this quickly, but a generated
+// spawn/dungeon/interior template stays small. Below this, maps are
+// fingerprinted and compared; anything larger is skipped entirely, both
+// because it won't be a template match and to keep this cheap (the main
+// overworld alone can have tens of thousands of grids).
+const maxSpawnZoneGrids = 20
+
+// Same image sets Marker.js uses for MINESHAFT_IMAGES/CAVE_IMAGES --
+// kept in sync manually since this is Go, not shared code. A real
+// mine/cave layer gets an entrance marker dropped on it when it's
+// physically connected to another map (see the entry-point marker in
+// item 4/gridUpdate); a map with none of these is either not actually
+// a mine/cave, or is disconnected -- e.g. a spawn zone, reached by
+// teleport rather than a physical ladder/cave-in.
+var entryMarkerImages = map[string]bool{
+	"mm/down": true, "mm/up": true, "gfx/terobjs/minehole": true, "gfx/terobjs/ladder": true,
+	"gfx/hud/mmap/cave": true, "gfx/tiles/ridges/cavein": true, "gfx/tiles/ridges/cavein2": true, "gfx/tiles/ridges/caveout": true,
+}
+
+// findSmallMapCandidates returns, for every map at or under
+// maxSpawnZoneGrids, its grid count and grid entries (id/coord) --
+// shared groundwork for both findDuplicateMaps and
+// findMapsWithoutEntry so the grids bucket is only scanned once.
+func (m *Map) findSmallMapCandidates() (gridCounts map[int]int, candidates map[int][]struct {
+	id   string
+	x, y int
+}, mapInfos map[int]MapInfo, err error) {
+	gridCounts = map[int]int{}
+	err = m.db.View(func(tx *bbolt.Tx) error {
+		grids := tx.Bucket([]byte("grids"))
+		if grids == nil {
+			return nil
+		}
+		return grids.ForEach(func(k, v []byte) error {
+			gd := GridData{}
+			if json.Unmarshal(v, &gd) == nil {
+				gridCounts[gd.Map]++
+			}
+			return nil
+		})
+	})
+	if err != nil {
+		return
+	}
+
+	candidates = map[int][]struct {
+		id   string
+		x, y int
+	}{}
+	mapInfos = map[int]MapInfo{}
+	err = m.db.View(func(tx *bbolt.Tx) error {
+		grids := tx.Bucket([]byte("grids"))
+		if grids != nil {
+			ferr := grids.ForEach(func(k, v []byte) error {
+				gd := GridData{}
+				if json.Unmarshal(v, &gd) != nil {
+					return nil
+				}
+				if count := gridCounts[gd.Map]; count > 0 && count <= maxSpawnZoneGrids {
+					candidates[gd.Map] = append(candidates[gd.Map], struct {
+						id   string
+						x, y int
+					}{id: gd.ID, x: gd.Coord.X, y: gd.Coord.Y})
+				}
+				return nil
+			})
+			if ferr != nil {
+				return ferr
+			}
+		}
+		maps := tx.Bucket([]byte("maps"))
+		if maps != nil {
+			for mapid := range candidates {
+				raw := maps.Get([]byte(strconv.Itoa(mapid)))
+				mi := MapInfo{ID: mapid}
+				if raw != nil {
+					json.Unmarshal(raw, &mi)
+				}
+				mapInfos[mapid] = mi
+			}
+		}
+		return nil
+	})
+	return
+}
+
+// findMapsWithoutEntry returns every small candidate map (same size
+// cutoff as findDuplicateMaps) that has zero Mineshaft/Cave-type
+// markers anywhere on it -- a second, independent signal for the same
+// kind of junk map, since a map could fail to template-match anything
+// (e.g. it's the only instance of its kind currently in the data) but
+// still be an orphaned zone with no real entrance.
+// computeHasEntry checks, for every map in candidates, whether it has at
+// least one Mineshaft/Cave-type marker on it -- shared by
+// findDuplicateMaps (to flag when a whole group also lacks any entry,
+// the strongest combined signal) and findMapsWithoutEntry.
+func (m *Map) computeHasEntry(candidates map[int][]struct {
+	id   string
+	x, y int
+}) (map[int]bool, error) {
+	gridToMap := map[string]int{}
+	for mapid, entries := range candidates {
+		for _, e := range entries {
+			gridToMap[e.id] = mapid
+		}
+	}
+
+	hasEntry := map[int]bool{}
+	err := m.db.View(func(tx *bbolt.Tx) error {
+		mb := tx.Bucket([]byte("markers"))
+		if mb == nil {
+			return nil
+		}
+		grid := mb.Bucket([]byte("grid"))
+		if grid == nil {
+			return nil
+		}
+		return grid.ForEach(func(k, v []byte) error {
+			gridID := strings.SplitN(string(k), "_", 2)[0]
+			mapid, ok := gridToMap[gridID]
+			if !ok {
+				return nil
+			}
+			marker := Marker{}
+			if json.Unmarshal(v, &marker) == nil && entryMarkerImages[marker.Image] {
+				hasEntry[mapid] = true
+			}
+			return nil
+		})
+	})
+	return hasEntry, err
+}
+
+func (m *Map) findMapsWithoutEntry() ([]MapInfo, error) {
+	_, candidates, mapInfos, err := m.findSmallMapCandidates()
+	if err != nil {
+		return nil, err
+	}
+	hasEntry, err := m.computeHasEntry(candidates)
+	if err != nil {
+		return nil, err
+	}
+
+	result := []MapInfo{}
+	for mapid := range candidates {
+		if !hasEntry[mapid] {
+			result = append(result, mapInfos[mapid])
+		}
+	}
+	sort.Slice(result, func(i, j int) bool { return result[i].ID < result[j].ID })
+	return result, nil
+}
+
+func (m *Map) findDuplicateMaps() ([]DuplicateGroup, error) {
+	gridCounts, candidates, mapInfos, err := m.findSmallMapCandidates()
+	if err != nil {
+		return nil, err
+	}
+	hasEntry, err := m.computeHasEntry(candidates)
+	if err != nil {
+		return nil, err
+	}
+
+	groups := map[string][]int{}
+	for mapid, entries := range candidates {
+		minX, minY := entries[0].x, entries[0].y
+		for _, e := range entries {
+			if e.x < minX {
+				minX = e.x
+			}
+			if e.y < minY {
+				minY = e.y
+			}
+		}
+		type norm struct {
+			x, y int
+			hash string
+		}
+		normed := make([]norm, 0, len(entries))
+		for _, e := range entries {
+			f, err := os.Open(filepath.Join(m.gridStorage, "grids", e.id+".png"))
+			if err != nil {
+				// A grid this map thinks it has, but whose tile image is
+				// missing on disk -- skip that one tile rather than
+				// failing this map's whole fingerprint (and definitely
+				// rather than crashing the report over one bad file).
+				continue
+			}
+			h := sha256.New()
+			_, copyErr := io.Copy(h, f)
+			f.Close()
+			if copyErr != nil {
+				continue
+			}
+			normed = append(normed, norm{x: e.x - minX, y: e.y - minY, hash: hex.EncodeToString(h.Sum(nil))})
+		}
+		sort.Slice(normed, func(i, j int) bool {
+			if normed[i].x != normed[j].x {
+				return normed[i].x < normed[j].x
+			}
+			if normed[i].y != normed[j].y {
+				return normed[i].y < normed[j].y
+			}
+			return normed[i].hash < normed[j].hash
+		})
+		fp := sha256.New()
+		for _, n := range normed {
+			fmt.Fprintf(fp, "%d,%d,%s;", n.x, n.y, n.hash)
+		}
+		fingerprint := hex.EncodeToString(fp.Sum(nil))
+		groups[fingerprint] = append(groups[fingerprint], mapid)
+	}
+
+	result := []DuplicateGroup{}
+	for fp, mapids := range groups {
+		if len(mapids) < 2 {
+			continue
+		}
+		dg := DuplicateGroup{Fingerprint: fp[:12]}
+		dg.NoneHaveEntry = true
+		for _, id := range mapids {
+			dg.Maps = append(dg.Maps, mapInfos[id])
+			if hasEntry[id] {
+				dg.NoneHaveEntry = false
+			}
+		}
+		dg.GridCount = gridCounts[mapids[0]]
+		sort.Slice(dg.Maps, func(i, j int) bool { return dg.Maps[i].ID < dg.Maps[j].ID })
+		result = append(result, dg)
+	}
+	sort.Slice(result, func(i, j int) bool { return len(result[i].Maps) > len(result[j].Maps) })
+	return result, nil
+}
+
+func (m *Map) adminDuplicateMaps(rw http.ResponseWriter, req *http.Request) {
+	s := m.getSession(req)
+	if s == nil || !s.Auths.Has(AUTH_ADMIN) {
+		http.Redirect(rw, req, "/", 302)
+		return
+	}
+	groups, err := m.findDuplicateMaps()
+	if err != nil {
+		log.Println(err)
+		http.Error(rw, "internal error", http.StatusInternalServerError)
+		return
+	}
+	noEntry, err := m.findMapsWithoutEntry()
+	if err != nil {
+		log.Println(err)
+		http.Error(rw, "internal error", http.StatusInternalServerError)
+		return
+	}
+	// Solo is the no-entry list minus anything already shown in a
+	// template-match group above -- keeps this one combined report
+	// instead of listing the same map twice under two headings.
+	inGroup := map[int]bool{}
+	for _, g := range groups {
+		for _, mi := range g.Maps {
+			inGroup[mi.ID] = true
+		}
+	}
+	solo := []MapInfo{}
+	for _, mi := range noEntry {
+		if !inGroup[mi.ID] {
+			solo = append(solo, mi)
+		}
+	}
+	m.ExecuteTemplate(rw, filepath.FromSlash("admin/duplicates.tmpl"), struct {
+		Page    Page
+		Session *Session
+		Groups  []DuplicateGroup
+		Solo    []MapInfo
+	}{
+		Page:    m.getPage(req),
+		Session: s,
+		Groups:  groups,
+		Solo:    solo,
+	})
+}
+

@@ -47,6 +47,26 @@
                 </div>
                 <button class="btn waves-effect waves-light" type="submit" name="action">Save</button>
             </form>
+            <div class="card">
+                <div class="card-content">
+                    <h5>Delete map</h5>
+                    <p>Permanently removes this map layer and everything on
+                        it -- grids, tiles, markers, roads, and custom
+                        markers.</p>
+                    <a class="waves-effect waves-light red btn modal-trigger" href="#deleteMap">Delete!</a>
+                    <div id="deleteMap" class="modal">
+                        <div class="modal-content">
+                        <h4>Delete "{{.MapInfo.Name}}"</h4>
+                        <p>This will remove every grid, tile, marker, road, and custom marker on this map layer.</p>
+                        <h5>THIS CANNOT BE UNDONE!</h5>
+                        </div>
+                        <div class="modal-footer">
+                        <a href="#!" class="modal-close waves-effect waves-light green btn">Cancel</a>
+                        <a href="/admin/deleteMap?map={{.MapInfo.ID}}" class="waves-effect waves-light red btn">DELETE</a>
+                        </div>
+                    </div>
+                </div>
+            </div>
 		</div>
         <script src="https://cdnjs.cloudflare.com/ajax/libs/materialize/1.0.0/js/materialize.min.js"></script>
         <script>M.AutoInit();</script>

@@ -874,3 +874,235 @@ item 17.
 **Potential complications:**
 - Verified live: the Map label and Thingwalls' show/hide-names icon
   both measure `left: 37px` -- exact pixel alignment, not approximate.
+
+## 20. Admin: delete a map layer entirely; Users/Maps sections made collapsible
+
+**What it does:** Two admin-page changes. (1) Each map's Edit page gets a
+"Delete map" danger-zone action (same confirm-modal pattern as the
+existing "Wipe all data") that permanently removes that one map layer and
+everything scoped to it -- grids, tiles, markers, roads, custom markers --
+without touching any other map. A matching "Delete" link was also added
+to each row on the admin index's map list. (2) The Users and Maps
+sections on the admin index are now collapsible (open by default) instead
+of two bare tables sitting in a long flat page.
+
+**Why:** Directly requested -- there was previously no way to remove a
+map layer at all, only Hide it (which just stops it from being listed;
+the data stays). The collapsible sections were the first requested step
+("at the bare minimum to start") toward cleaning up what was described as
+a chaotic-looking admin page; the other cards further down (Prefix,
+Title, Ping sound, Wipe, etc.) are unchanged for now.
+
+**Files:** `admin.go` (`deleteMap`), `main.go` (route registration),
+`templates/admin/map.tmpl` (Delete button + modal), `templates/admin/
+index.tmpl` (Delete link per map row, `<details>`-based collapsible
+sections + CSS)
+
+**How it works:** Storage for each data type turned out to need a
+different deletion strategy, found by reading the actual write paths
+rather than assumed: `grids` is a flat bucket keyed by grid ID with a
+`Map` field per record, so it's scanned and filtered. `tiles` is already
+nested as `tiles/{mapID}/{zoom}/{coord}` (see `SaveTile` in tile.go), so
+deleting a map's tiles is one `DeleteBucket` call, no scanning needed.
+`markers` was the trickiest -- actual marker records live under
+`markers/grid` keyed by `"{gridID}_{x}_{y}"` with no `Map` field of their
+own (see `markerUpdate` in client.go), so deleting them requires first
+collecting which grid IDs belong to the map being deleted, then matching
+marker keys by that grid-ID prefix; `markers/id` is a separate
+id-to-gridkey index for admin lookups by numeric ID that also needs its
+matching stale entries removed, or lookups by ID would resolve to a
+grid-key that no longer exists. `roads` and `customMarkers` are flat
+buckets with their own `Map` field, same pattern as `grids`. All of this
+runs inside one `bbolt` transaction, matching the existing `wipe()`
+handler's approach just scoped to one map ID instead of every bucket
+outright. The collapsible sections are plain HTML `<details>`/`<summary>`
+-- no JS dependency, since this page already only uses Materialize CSS
+plus a little intercooler.js for the Hide/Show AJAX toggle, not a
+reactive framework.
+
+**Potential complications:**
+- This is genuinely irreversible, more surgically than "Wipe all data"
+  (which nukes everything) -- there's no soft-delete or backup step, by
+  design matching how Wipe already works.
+- Verified live with real data, not just reasoning about the code: added
+  a temporary debug endpoint (removed again before finishing) that
+  counted grids/markers/roads/customMarkers/tiles-exist/map-exists for a
+  given map ID. Picked a small test map (9 grids, 3 markers -- enough to
+  exercise the marker-cascade path, unlike some other test maps in this
+  data with 0 markers) rather than the main overworld map (16,643 grids,
+  1,180 markers) to keep the blast radius small. Before: `grids:9,
+  markers:3, tilesExist:true, mapExists:true`. After deleteMap: `grids:0,
+  markers:0, tilesExist:false, mapExists:false` -- and re-checked the
+  main overworld map immediately after to confirm its own counts (16,643
+  grids, 1,180 markers) were completely unaffected, i.e. the deletion
+  was correctly scoped to only the targeted map.
+- Also verified the actual UI path, not just the raw endpoint: clicked
+  the real "Delete!" button on a map's edit page and confirmed the modal
+  opens with that map's name/ID in the confirmation text before either
+  Cancel or DELETE is pressed.
+- The collapsible sections' open/closed toggle was verified via a real
+  click on each `<summary>`, confirming both start open and correctly
+  collapse.
+
+## 21. Admin polish: sections closed by default, Public moved above Users, Maps table gets icon buttons
+
+**What it does:** Three follow-ups to item 20. (1) Users/Maps now start
+collapsed instead of open. (2) The "Public" access link moves above the
+Users section entirely, instead of sitting inside it next to "Add user"
+-- it's a site-wide setting, not a user account. (3) Each map row's
+Edit/Hide/Delete actions are now small circular icon buttons (pencil,
+eye/eye-off, red circle with an X) instead of three separate text
+buttons, tighter together.
+
+**Why:** Directly requested, after seeing item 20 live.
+
+**Files:** `templates/admin/index.tmpl` (icon-btn CSS, Public moved,
+`open` removed from both `<details>`, Maps table body swapped to icon
+buttons)
+
+**How it works:** The Hide/Show toggle keeps the same intercooler
+`ic-post-to` AJAX wiring as before (item 20/pre-existing) -- only the
+block's rendered content changed, from "Show"/"Hide" text to a
+`visibility`/`visibility_off` Material icon, so the partial swap on
+click still works the same way. Edit and Delete are plain links styled
+as circles via `.icon-btn`; Delete gets `.icon-btn-delete` for the red
+background, matching the "red background, black X" ask.
+
+**Potential complications:**
+- Verified live: both sections read `open: false` on load; the Public
+  link's DOM position now precedes the Users `<details>`
+  (`compareDocumentPosition` check); the Hide/Show icon button still
+  correctly flips between `visibility`/`visibility_off` on click, same
+  live AJAX behavior as before, just re-skinned.
+
+## 22. Admin: "Duplicates Detected" report -- flags likely spawn zones, dungeon instances, and disconnected caves for review (experimental)
+
+**What it does:** A new `/admin/duplicateMaps` page (linked from the Maps
+section) surfaces small map layers (under 20 grids) that look like
+junk -- spawn zones, dungeon instances, house interiors, or other
+generated/orphaned layers -- using two independent signals, combined
+into one report with a confidence split:
+
+- **High confidence:** maps that both match another map's *exact* tile
+  layout *and* have no Mineshaft/Cave-type marker anywhere on them.
+- **Lower confidence (two sub-sections):** maps that match another
+  map's layout but do have an entrance marker, and maps with no
+  entrance marker that don't match any other map's layout.
+
+Nothing is deleted automatically. Each entry has its own Edit/Delete
+icon buttons, matching the Maps table.
+
+**Why:** Directly requested, to find and clean up spawn zones and
+similar junk layers accumulating in the map list. Marked experimental
+per your request, since the detection is real but imperfect --
+verified against labeled ground truth this session (see below) rather
+than left as an unvalidated guess.
+
+**Files:** `admin.go` (`DuplicateGroup`, `maxSpawnZoneGrids`,
+`entryMarkerImages`, `findSmallMapCandidates`, `computeHasEntry`,
+`findDuplicateMaps`, `findMapsWithoutEntry`, `adminDuplicateMaps`),
+`main.go` (route registration), `templates/admin/duplicates.tmpl` (new),
+`templates/admin/index.tmpl` ("Find duplicate small maps" link)
+
+**How it works:**
+- **Layout-match signal:** every grid tile under 20-grid maps gets
+  SHA-256 hashed by file content, normalized to offsets relative to
+  that map's own bounding box (so the same template matches regardless
+  of which absolute coordinates the mapper happened to assign it), then
+  all of a map's (relative-x, relative-y, tile-hash) triples get hashed
+  together into one fingerprint. Maps sharing a fingerprint are grouped.
+  Maps over 20 grids are excluded entirely, both because a real
+  explored area won't match a small template and to keep this cheap --
+  the main overworld alone can have tens of thousands of grids.
+- **Entrance-marker signal:** checks every marker on a small map against
+  `entryMarkerImages`, the same Mineshaft/Cave image set Marker.js uses
+  (`mm/down`, `mm/up`, `gfx/terobjs/minehole`, `gfx/terobjs/ladder`,
+  `gfx/hud/mmap/cave`, `gfx/tiles/ridges/cavein`/`cavein2`/`caveout`) --
+  deliberately *not* including `gfx/terobjs/mm/custom` (the invisible
+  entrance/last-known-position marker from item 3), since the ask was
+  specifically about real, player-visible cave/minehole markers, not
+  the mapper's own internal tracking markers.
+- Both signals are computed from one shared `findSmallMapCandidates()`
+  pass over the `grids` bucket, so the data is only scanned once
+  regardless of how many maps qualify.
+
+**Ground-truth validation this session (real data, not synthetic):**
+Ran this against `reference-test-data` and got labels for every small
+map from the person who actually knows what they are:
+- The high-confidence list flagged exactly `5, 6, 7, 11, 12, 13, 14, 15`
+  as four template-matched pairs -- confirmed as **8/8 real spawn
+  zones**, zero false positives.
+- Map 9 (a real mine with a genuine entrance) was correctly excluded
+  from every list -- confirms the entrance-marker signal recognizes a
+  real positive, not just flagging everything.
+- Map 18 (a valid spawn not yet stitched into a known region) was also
+  correctly excluded.
+- The lower-confidence "no entrance marker" list additionally caught
+  4 (Fox Burrow, a real mini dungeon), and 16/17/19 (real cave systems)
+  -- confirmed as real content whose entrance marker simply never got
+  uploaded (older client, or icons not yet toggled on, per the map 16
+  case specifically). These aren't wrong to flag -- they're genuinely
+  small, orphaned, and hard to coordinate-anchor -- but they're real
+  data, which is exactly why this stays a review list, never
+  auto-delete.
+- This validation is also what "tuned" the report structure: the two
+  raw signals started as two separate lists with overlapping entries
+  (a map showing up twice); per your request they're now one combined
+  report, split into the high/lower-confidence sections above so a map
+  only appears once, in its strongest-evidence bucket.
+
+**Potential complications:**
+- Exact-hash tile matching could still miss a true template duplicate
+  if the client renders the same tile with pixel-level differences
+  between sessions (lighting, foliage frame) -- not hit in this
+  session's testing, but a known theoretical gap; a perceptual/fuzzy
+  hash would be more robust if this turns out to matter in practice.
+- The "no entrance marker" signal, even split into its own
+  lower-confidence section, will keep surfacing real dungeons/caves
+  whose upload simply predates marker support or icon toggling -- this
+  is a genuine data-completeness gap, not something fixable by
+  widening the marker-image list (both real false-positive maps found
+  this session had *zero* markers of any kind, not markers of some
+  other unrecognized type).
+- Houses weren't tested this session (real cave/mine data was generated
+  and checked instead) -- flagged as a known risk earlier: a house
+  interior could plausibly template-match another house if both stay
+  unfurnished/unexplored past their shared starting layout, which would
+  be a real false positive on the high-confidence list specifically,
+  unlike the spawn-zone case. Worth checking before trusting that
+  section fully for houses.
+
+## 23. Admin UI fixes: inline delete confirmation (no detour through Edit), and a cursor bug
+
+**What it does:** Two small fixes on top of items 20-22. (1) The Delete
+icon on both the Maps table and the new Duplicates report now opens its
+confirmation modal directly on the same page, instead of linking to the
+map's Edit page first just to reach the same modal there. (2) The
+Show/Hide eye icon no longer shows a text-selection (I-beam) cursor on
+hover -- it was missing `cursor: pointer` entirely; every other icon
+button had it implicitly from other styling, this one didn't.
+
+**Why:** Directly requested -- the Edit-page detour for Delete was
+redundant now that the confirmation modal itself doesn't need anything
+from that page, and the cursor was a real (if minor) usability
+nuisance, even though the button worked correctly.
+
+**Files:** `templates/admin/index.tmpl` (per-row delete modal, `.icon-btn`
+CSS), `templates/admin/duplicates.tmpl` (same per-row modal pattern via
+a new `admin/duplicates.tmpl:maptable` sub-template, reused across all
+three report sections instead of duplicating the row markup three times)
+
+**How it works:** Each map row now carries its own
+`<div id="deleteMap-{ID}" class="modal">`, matching the exact confirm
+text/buttons already used on the Edit page's delete modal (item 20),
+just triggered inline (`href="#deleteMap-{ID}" class="... modal-trigger"`)
+instead of navigating there. `map.tmpl`'s own Delete button/modal is
+unchanged -- Edit still has its own working delete path, this just stops
+forcing a detour through it from the list views.
+
+**Potential complications:**
+- Verified live: clicking Delete on both the Maps table and the
+  Duplicates report opens the modal without a page navigation
+  (`location.pathname` unchanged), with the correct map name/ID in the
+  confirmation text; the eye icon's computed `cursor` now reads
+  `pointer`.

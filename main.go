@@ -137,6 +137,8 @@ func main() {
 	http.HandleFunc("/admin/merge", m.merge)
 	http.HandleFunc("/admin/map", m.adminMap)
 	http.HandleFunc("/admin/mapic", m.adminICMap)
+	http.HandleFunc("/admin/deleteMap", m.deleteMap)
+	http.HandleFunc("/admin/duplicateMaps", m.adminDuplicateMaps)
 
 	// Map frontend endpoints
 	http.HandleFunc("/map/api/v1/characters", m.getChars)

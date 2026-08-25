@@ -94,3 +94,17 @@ files touched, root causes, verification notes -- in `CHANGES.md`):
 - Layout fixes: app bar spans the full width, drawer no longer overlaps
   it, row/label alignment cleaned up throughout
 - Only Thingwalls and Vortexes are visible by default now
+
+**Admin panel**
+
+- Map layers can now be permanently deleted (grids, tiles, markers,
+  roads, custom markers all cascade), not just hidden
+- Users/Maps sections are collapsible; Public access moved out of Users
+  (it's a site-wide setting, not a user account); Maps table gets
+  compact icon buttons (Edit/Show-hide/Delete)
+- New experimental "Duplicates Detected" report — flags small map
+  layers (spawn zones, dungeon instances, disconnected caves) for
+  manual review, using tile-layout matching and entrance-marker
+  detection; nothing auto-deletes
+- Delete now confirms inline instead of routing through the Edit page
+  first
